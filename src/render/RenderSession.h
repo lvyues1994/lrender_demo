@@ -4,9 +4,12 @@
 #include <lr/scene/World.h>
 namespace demo {
 class AssetLoader; // P8 nonowning injection only; no invented implementation
-// GUI-thread lifetime and serial commands; inputs are initialized owned resources.
+// Construct and issue serial commands on GUI; inputs are initialized owned resources.
 // Supply a serial-host World (no parallel-propagation waits on the GUI owner).
 // Shutdown is asynchronous: keep the application event loop alive through onStopped.
+// Destruction is noexcept. Off-owner destruction queues GUI detach/stop and diagnoses;
+// callback targets must stay valid until queued detach. No off-owner World/scope access.
+// A missing application/failed teardown is a fatal contract diagnostic, not an exception.
 // Destruction detaches UI observers, not accepted producer/cleanup work. A nonempty
 // SubmitFrame override must eventually report any possibly accepted work even after
 // throwing; only the real renderer path has a terminal renderer-barrier fallback.
@@ -15,7 +18,7 @@ public:
   RenderSession(std::unique_ptr<lr::runtime::Runtime>, std::unique_ptr<lr::render::Renderer>,
                 std::unique_ptr<lr::scene::World>, std::unique_ptr<PresentationAdapter>, SubmitFrame,
                 SessionEvents);
-  ~RenderSession();
+  ~RenderSession() noexcept;
   RenderSession(RenderSession const &) = delete;
   RenderSession &operator=(RenderSession const &) = delete;
   void start();

@@ -437,7 +437,12 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     publish();
     queueTick();
   }
-  void historyChange() {
+  void historyChange(bool temporalTransition = false) {
+    // A camera-only update has no temporal history in plain visibility. Keep its
+    // target/epoch and acknowledge the pending reset only at accepted submit.
+    auto const options = state.snapshot()->options;
+    if (!temporalTransition && options.pipeline == PipelineKind::Visibility && !options.taa)
+      return;
     if (target && !targetFresh && state.historyResetPending() && !rebuild) {
       state.presentationInvalidated({ErrorStage::Surface, true, "history target reset",
                                      "camera/pipeline/TAA change requires fresh target"});
@@ -482,11 +487,31 @@ RenderSession::RenderSession(std::unique_ptr<lr::runtime::Runtime> runtime,
                                    std::move(adapter), std::move(submit), std::move(events))) {
   impl_->keepAlive = impl_;
 }
-RenderSession::~RenderSession() {
-  if (impl_) {
-    impl_->events = {};
-    impl_->uiScope.reset();
-    impl_->stop();
+RenderSession::~RenderSession() noexcept {
+  if (!impl_)
+    return;
+  if (!QCoreApplication::instance())
+    qFatal("RenderSession destruction requires a live GUI application through onStopped");
+  bool const guiOwner = QThread::currentThread() == impl_->thread();
+  auto detachAndStop = [owner = std::move(impl_)]() noexcept {
+    try {
+      owner->owner();
+      owner->events = {};
+      owner->uiScope.reset();
+      owner->stop();
+    } catch (...) {
+      qFatal("RenderSession noexcept GUI teardown failed");
+    }
+  };
+  if (guiOwner) {
+    detachAndStop();
+  } else {
+    qWarning("RenderSession: worker destruction queues observer detach and stop on GUI");
+    try {
+      post(std::move(detachAndStop));
+    } catch (...) {
+      qFatal("RenderSession could not queue noexcept GUI teardown");
+    }
   }
 }
 void RenderSession::start() {
@@ -530,8 +555,9 @@ void RenderSession::setRenderOptions(RenderOptions options) {
   s.owner();
   if (s.blocked())
     return;
+  auto const previous = s.state.snapshot()->options;
   s.state.setRenderOptions(options);
-  s.historyChange();
+  s.historyChange(previous.pipeline != options.pipeline || previous.taa != options.taa);
   s.pump.setContinuous(options.pipeline == PipelineKind::Pathtrace || options.taa);
   s.pump.markDirty();
   s.queueTick();

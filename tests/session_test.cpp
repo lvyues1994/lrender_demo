@@ -572,3 +572,197 @@ TEST_CASE("session/snapshot-observer-may-destroy-wrapper-with-live-callback-capt
   REQUIRE(test::until([&] { return destroyed->load(); }));
   CHECK(weak.expired());
 }
+
+TEST_CASE("session/fix-visibility-camera-keeps-target-and-submits-latest-camera") {
+  Harness h;
+  auto r = resources();
+  std::vector<std::string> stages;
+  auto adapter = std::make_unique<ReadbackAdapter>(h.imageEvents(), [&](auto stage, Done done) {
+    stages.push_back(stage);
+    done(std::monostate{});
+  });
+  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world), std::move(adapter),
+                  h.submit(), h.events());
+  start(s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() == 1; }));
+  auto target = h.jobs[0].frame.views[0].target;
+  auto generation = s.snapshot()->generation;
+  h.complete(0);
+  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
+  for (unsigned i = 1; i <= 3; ++i) {
+    CameraState camera;
+    camera.camera.position.x = i * 0.1f;
+    s.setCamera(camera);
+    RenderOptions exposure;
+    exposure.exposure = 1 + i * 0.1f;
+    s.setRenderOptions(exposure);
+    REQUIRE(test::until([&] { return h.jobs.size() == i + 1; }));
+    CHECK(h.jobs[i].frame.views[0].camera.position.x == camera.camera.position.x);
+    CHECK(h.jobs[i].frame.views[0].target == target);
+    CHECK(s.snapshot()->generation == generation);
+    h.complete(i);
+    REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
+  }
+  CHECK(stages == std::vector<std::string>{"prepare"});
+  stop(s, h);
+}
+TEST_CASE("session/fix-visibility-camera-real-cpu-does-not-reprepare") {
+  Harness h;
+  auto r = resources();
+  std::vector<std::string> stages;
+  auto adapter = std::make_unique<ReadbackAdapter>(h.imageEvents(), [&](auto stage, Done done) {
+    stages.push_back(stage);
+    done(std::monostate{});
+  });
+  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world), std::move(adapter), {},
+                  h.events());
+  start(s, false);
+  REQUIRE(test::until([&] { return h.images >= 1; }));
+  auto generation = s.snapshot()->generation;
+  for (unsigned i = 1; i <= 3; ++i) {
+    auto next = h.images + 1;
+    CameraState camera;
+    camera.camera.position.x = i * 0.1f;
+    s.setCamera(camera);
+    REQUIRE(test::until([&] { return h.images >= next; }));
+    CHECK(s.snapshot()->generation == generation);
+    CHECK(stages == std::vector<std::string>{"prepare"});
+  }
+  std::cout << "Visibility camera CPU: images=" << h.images
+            << " prepare/drain/release stages=" << stages.size() << " generation=" << s.snapshot()->generation
+            << "\n";
+  stop(s, h);
+}
+TEST_CASE("session/fix-disabling-taa-still-rebuilds-history-target") {
+  Harness h;
+  auto s = session(h);
+  RenderOptions options;
+  options.taa = true;
+  s->setRenderOptions(options);
+  s->setViewport({{8, 8}, {8, 8}, 1});
+  s->start();
+  REQUIRE(test::until([&] { return h.jobs.size() == 2; }));
+  auto target = h.jobs[0].frame.views[0].target;
+  auto generation = s->snapshot()->generation;
+  options.taa = false;
+  s->setRenderOptions(options);
+  h.complete(0);
+  h.complete(1);
+  REQUIRE(test::until([&] { return h.jobs.size() == 3; }));
+  CHECK(s->snapshot()->generation > generation);
+  CHECK(h.jobs[2].frame.views[0].target != target);
+  s->requestStop();
+  h.complete(2);
+  stop(*s, h);
+}
+
+TEST_CASE("session/fix-worker-wrapper-destruction-queues-gui-cleanup") {
+  struct Tracked : ReadbackAdapter {
+    std::shared_ptr<std::atomic<QThread *>> destroyed;
+    explicit Tracked(std::shared_ptr<std::atomic<QThread *>> d) : ReadbackAdapter({}), destroyed(d) {}
+    ~Tracked() { destroyed->store(QThread::currentThread()); }
+  };
+  auto destroyed = std::make_shared<std::atomic<QThread *>>(nullptr);
+  auto r = resources();
+  auto s =
+      std::make_unique<RenderSession>(std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+                                      std::make_unique<Tracked>(destroyed), SubmitFrame{}, SessionEvents{});
+  lexec::simple_counting_scope scope;
+  std::atomic<bool> joined{false};
+  lexec::spawn(lexec::schedule(fixturePool().get_scheduler()) |
+                   lexec::then([s = std::move(s)]() mutable noexcept { s.reset(); }),
+               scope.get_token());
+  scope.close();
+  auto join = lexec::connect(scope.join(), Joined{&joined});
+  lexec::start(join);
+  REQUIRE(test::until([&] { return joined.load(); }));
+  REQUIRE(test::until([&] { return destroyed->load() != nullptr; }));
+  CHECK(destroyed->load() == QCoreApplication::instance()->thread());
+}
+namespace {
+struct TargetEvidence {
+  unsigned created = 0, destroyed = 0;
+  bool releasedAfterDestroy = false;
+  std::atomic<bool> adapterDestroyed{false};
+};
+struct CountingTargets : lr::render::RenderTargets {
+  lr::render::RenderTargets &inner;
+  std::shared_ptr<TargetEvidence> evidence;
+  CountingTargets(lr::render::RenderTargets &i, std::shared_ptr<TargetEvidence> e) : inner(i), evidence(e) {}
+  lr::core::RenderTargetId createWindow(lr::render::WindowTargetDesc const &d) override {
+    return inner.createWindow(d);
+  }
+  lr::core::RenderTargetId createImage(lr::render::ImageTargetDesc const &d) override {
+    auto id = inner.createImage(d);
+    ++evidence->created;
+    return id;
+  }
+  void resize(lr::core::RenderTargetId id, lr::core::ivec2 e) override { inner.resize(id, e); }
+  void destroy(lr::core::RenderTargetId id) override {
+    inner.destroy(id);
+    ++evidence->destroyed;
+  }
+};
+struct CountingRenderer : lr::render::Renderer {
+  std::unique_ptr<lr::render::Renderer> inner;
+  CountingTargets tracked;
+  CountingRenderer(std::unique_ptr<lr::render::Renderer> i, std::shared_ptr<TargetEvidence> e)
+      : inner(std::move(i)), tracked(inner->targets(), e) {}
+  tc::DeviceInfo const &deviceInfo() const noexcept override { return inner->deviceInfo(); }
+  lr::render::RendererCapabilities const &capabilities() const noexcept override {
+    return inner->capabilities();
+  }
+  lr::render::RenderTargets &targets() noexcept override { return tracked; }
+  lr::render::PipelineRegistry &pipelines() noexcept override { return inner->pipelines(); }
+  lr::render::MaterialModels &materialModels() noexcept override { return inner->materialModels(); }
+  lr::render::FrameSender submit(lr::render::FrameDesc f) override { return inner->submit(std::move(f)); }
+  lr::render::KernelReloadSender reloadKernels(std::string d) override {
+    return inner->reloadKernels(std::move(d));
+  }
+};
+struct ThrowContext : ReadbackAdapter {
+  std::shared_ptr<TargetEvidence> evidence;
+  bool throwOnBind = true;
+  std::function<void()> onBind;
+  explicit ThrowContext(std::shared_ptr<TargetEvidence> e) : ReadbackAdapter({}), evidence(e) {}
+  ~ThrowContext() { evidence->adapterDestroyed = true; }
+  void setFrameContext(SessionGeneration g, ViewportExtent const &e) override {
+    ReadbackAdapter::setFrameContext(g, e);
+    if (throwOnBind)
+      throw std::runtime_error("after actual target creation");
+    if (onBind)
+      onBind();
+  }
+  void releasePath(Done done) override {
+    evidence->releasedAfterDestroy = evidence->created == 1 && evidence->destroyed == 1;
+    ReadbackAdapter::releasePath(std::move(done));
+  }
+};
+} // namespace
+TEST_CASE("session/fix-created-target-bind-fault-drains-releases-and-drops-keepalive") {
+  bool stale = false;
+  SUBCASE("frame context throws") {}
+  SUBCASE("ready rejects changed generation") { stale = true; }
+  Harness h;
+  auto e = std::make_shared<TargetEvidence>();
+  auto r = resources();
+  r.renderer = std::make_unique<CountingRenderer>(std::move(r.renderer), e);
+  std::unique_ptr<RenderSession> s;
+  auto adapter = std::make_unique<ThrowContext>(e);
+  adapter->throwOnBind = !stale;
+  adapter->onBind = [&] { s->setViewport({{9, 8}, {9, 8}, 1}); };
+  s = std::make_unique<RenderSession>(std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+                                      std::move(adapter), h.submit(), h.events());
+  start(*s, false);
+  REQUIRE(test::until([&] { return s->snapshot()->life == LifeState::Failed; }));
+  CHECK(e->created == 1);
+  CHECK(e->destroyed == 0);
+  CHECK(h.jobs.empty());
+  REQUIRE_FALSE(h.errors.empty());
+  CHECK(h.errors.back().cause == (stale ? "stale presentation candidate" : "after actual target creation"));
+  stop(*s, h);
+  CHECK(e->destroyed == 1);
+  CHECK(e->releasedAfterDestroy);
+  s.reset();
+  REQUIRE(test::until([&] { return e->adapterDestroyed.load(); }));
+}
