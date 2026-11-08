@@ -19,7 +19,7 @@ void NativeSurfacePolicy::requireOwner() const {
 VkSurfaceKHR NativeSurfacePolicy::transfer(VkInstance instance, SurfaceCreator const &create) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!alive_ || released_ || attempted_ || instance == VK_NULL_HANDLE)
+        if (!alive_ || released_ || destroyed_ || attempted_ || instance == VK_NULL_HANDLE)
             throw std::logic_error("Surface: invalid lease, instance, or duplicate transfer");
         attempted_ = creating_ = true;
     }
@@ -55,10 +55,25 @@ void NativeSurfacePolicy::constructionFailed() {
         throw std::logic_error("Surface: constructor has not unwound or was already retired");
     drained_ = destroyed_ = true;
 }
+void NativeSurfacePolicy::requireWorker() const {
+    if(std::this_thread::get_id()==owner_) throw std::logic_error("presenter cleanup must not block GUI owner");
+}
+void NativeSurfacePolicy::setInvalidationHandler(std::function<void(std::uint64_t)> handler) {
+    requireOwner(); std::uint64_t serial;
+    { std::lock_guard<std::mutex> lock(mutex_); invalidated_=handler;serial=invalidationSerial_; }
+    if(handler && serial) handler(serial); // late subscriber sees already-invalid lease
+}
+std::uint64_t NativeSurfacePolicy::invalidationSerial() const {
+    std::lock_guard<std::mutex> lock(mutex_);return invalidationSerial_;
+}
 void NativeSurfacePolicy::invalidate() {
     requireOwner();
-    std::lock_guard<std::mutex> lock(mutex_);
-    alive_ = false;
+    std::function<void(std::uint64_t)> notify;std::uint64_t serial;
+    { std::lock_guard<std::mutex> lock(mutex_);
+      if(!alive_) return;
+      alive_=false;serial=++invalidationSerial_;notify=invalidated_;
+    }
+    if(notify) notify(serial); // GUI, outside lock; owner can stop admission immediately
 }
 void NativeSurfacePolicy::releaseHost() {
     requireOwner();

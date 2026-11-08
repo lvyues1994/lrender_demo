@@ -110,7 +110,7 @@ void SessionState::setVisible(bool visible) {
     requireOwner();
     if (!acceptsCommands() || visible_ == visible) return;
     visible_ = visible;
-    if (!visible && presentationValid_) retirePresentation();
+    if (!visible) retirePresentation(); // also invalidate queued readiness from Preparing/Recovering
     refreshPause();
 }
 void SessionState::pause() {

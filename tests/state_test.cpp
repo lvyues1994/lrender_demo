@@ -347,3 +347,16 @@ TEST_CASE("state/fix-recovering-and-failed-reject-current-epoch-frames-too") {
     state.fail({ErrorStage::Submit, false, "fatal", "cause"});
     CHECK_FALSE(state.acceptsFrame(stamp(state)));
 }
+
+TEST_CASE("state/p4-queued-hidden-ready-across-show-is-stale") {
+ for (bool recovery : {false,true}) {
+  SessionState s; s.selectModel({"asset"}); s.setViewport(extent()); s.start();
+  if(recovery) s.presentationInvalidated({ErrorStage::Surface,true,"lost","native"});
+  auto generation=s.snapshot()->generation; auto request=s.snapshot()->request;
+  s.setVisible(false); s.setVisible(true);
+  CHECK(s.snapshot()->generation == generation+1); CHECK(s.snapshot()->request==request);
+  CHECK_FALSE(s.presentationReady(generation,PresentationPath::VulkanShared));
+  CHECK_FALSE(s.canSubmit());
+  REQUIRE(s.presentationReady(s.snapshot()->generation,PresentationPath::VulkanShared)); CHECK(s.canSubmit());
+ }
+}

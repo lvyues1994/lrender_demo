@@ -116,7 +116,7 @@ int main(int argc, char **argv) {
         std::shared_ptr<lr::present::VulkanPresenter> presenter;
         std::optional<lr::core::RenderTargetId> target;
         std::deque<lr::render::FrameSender> pending;
-        bool constructionAttempted = false, deviceAvailable = false;
+        bool deviceAvailable = false;
         std::uint64_t submitted = 0, completed = 0, maxInFlight = 0;
         auto measured = [&](char const *phase, auto &&function) {
             auto before = heartbeat.load(); auto start = Clock::now();
@@ -158,25 +158,29 @@ int main(int argc, char **argv) {
             } while (Clock::now() < deadline);
             throw std::runtime_error("Platform: native server viewability transition exceeded 2s");
         };
+        std::string accountingError, completedFrameError;
         auto cleanup = [&] {
-            // All FrameSenders have resolved (including failures). No recorder can still
-            // own a Writing slot; upstream failure path calls discardShared().
-            drain();
+            // Frame errors are deferred only after every sender settled. Genuine
+            // flush/destruction failure still retains the host and hits deadline.
+            auto settle = [&] {
+                try { drain(); }
+                catch(std::exception const& e) { completedFrameError=e.what(); }
+            };
             if (presenter) {
-                measured("flush", [&] { presenter->flush(); });
-                lease->policy->drained();
-                auto stats = presenter->stats();
-                std::cout << "shown=" << stats.shown << " sharedShown=" << stats.sharedShown
-                          << " dropped=" << stats.dropped << " submitted=" << submitted
-                          << " completed=" << completed << " maxInFlight=" << maxInFlight << '\n';
-                require(stats.sharedShown > 0 || submitted == 0, "Synchronization: sharedShown stayed zero");
-                if (code == 0) require(stats.shown + stats.dropped == submitted,
-                                       "Synchronization: presenter accounting lost a submitted frame");
-                if (target) { renderer->targets().destroy(*target); target.reset(); }
-                measured("destruction", [&] { renderer.reset(); runtime.reset(); presenter.reset(); });
-                lease->policy->presenterDestroyed();
+                measured("cleanup-flush-and-destruction", [&] {
+                    demo::NativePresenterCleanup::run(lease->policy,presenter,settle,[&] {
+                        auto stats=presenter->stats();
+                        std::cout << "shown=" << stats.shown << " sharedShown=" << stats.sharedShown
+                                  << " dropped=" << stats.dropped << " submitted=" << submitted
+                                  << " completed=" << completed << " maxInFlight=" << maxInFlight << '\n';
+                        if(stats.sharedShown==0 && submitted!=0) accountingError="Synchronization: sharedShown stayed zero";
+                        if(code==0 && stats.shown+stats.dropped!=submitted) accountingError+=" Synchronization: presenter accounting lost a submitted frame";
+                        if(target) {renderer->targets().destroy(*target);target.reset();}
+                        renderer.reset();runtime.reset();
+                    });
+                });
             } else {
-                if (constructionAttempted) lease->policy->constructionFailed();
+                settle();
                 measured("destruction-before-presenter", [&] { renderer.reset(); runtime.reset(); });
             }
         };
@@ -198,8 +202,9 @@ int main(int argc, char **argv) {
                 pc.instanceExtensions = lease->instanceExtensions;
                 pc.createSurface = lease->createSurface;
                 pc.shareBuffers = true; pc.deviceNameContains = info.deviceName;
-                constructionAttempted = true;
-                presenter = lr::present::makeVulkanPresenter(std::move(pc));
+                presenter = demo::NativePresenterCleanup::construct(lease->policy,[&] {
+                    return lr::present::makeVulkanPresenter(std::move(pc));
+                });
             });
             // Real implementation compares BOTH device and driver UUID, not names.
             auto shared = presenter->sharesBuffersWith(info);
@@ -309,6 +314,10 @@ int main(int argc, char **argv) {
             std::cerr << "Synchronization: cleanup failed: " << error.what() << '\n';
             std::_Exit(2);
         }
+        // Accounting is not a cleanup operation: report only AFTER safe flush,
+        // target/renderer/presenter destruction, never through cleanup's _Exit.
+        if(!completedFrameError.empty()) {std::cerr << "completed frame error after cleanup: " << completedFrameError << '\n';code=1;}
+        if(!accountingError.empty()) {std::cerr << accountingError << " (resources safely cleaned)\n";code=1;}
         QMetaObject::invokeMethod(&app, [&] {
             factory->releaseHost();
             std::cout << "guiHeartbeats=" << heartbeat.load() << " maxHeartbeatGapMs=" << maxGap

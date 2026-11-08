@@ -1,6 +1,8 @@
 #include "presentation/NativeSurfaceFactory.h"
+#include "render/SessionState.h"
 #include <doctest/doctest.h>
 #include <QCoreApplication>
+#include <QPlatformSurfaceEvent>
 #include <QEventLoop>
 #include <QThread>
 #include <QPointer>
@@ -19,6 +21,13 @@
 namespace {
 auto const instance = reinterpret_cast<VkInstance>(std::uintptr_t{1});
 auto const surface = reinterpret_cast<VkSurfaceKHR>(std::uintptr_t{2});
+struct EmptyPresenter {void flush(){}};
+void finish(demo::NativeSurfacePolicy& policy) {
+ auto p=std::shared_ptr<demo::NativeSurfacePolicy>(&policy,[](auto*){});
+ auto presenter=std::make_shared<EmptyPresenter>();
+ auto worker=std::async(std::launch::async,[&]{demo::NativePresenterCleanup::run(p,presenter,[]{},[&]{CHECK_FALSE(policy.canRelease());});});
+ worker.get();
+}
 }
 TEST_CASE("native_surface/unique-transfer-drain-destroy-host") {
     demo::NativeSurfacePolicy policy;
@@ -30,10 +39,8 @@ TEST_CASE("native_surface/unique-transfer-drain-destroy-host") {
     CHECK_FALSE(policy.canRelease());
     CHECK_THROWS(policy.transfer(instance, [](VkInstance) { return surface; }));
     CHECK_THROWS(policy.releaseHost());
-    CHECK_THROWS(policy.presenterDestroyed());
-    policy.drained();
     CHECK_FALSE(policy.canRelease());
-    policy.presenterDestroyed();
+    finish(policy);
     CHECK(policy.hostAlive());
     policy.releaseHost();
     CHECK_FALSE(policy.hostAlive());
@@ -65,7 +72,9 @@ TEST_CASE("native_surface/gui-release-thread-enforced") {
 TEST_CASE("native_surface/constructor-unwind-releases-adopted-surface") {
     demo::NativeSurfacePolicy policy;
     policy.transfer(instance, [](VkInstance) { return surface; });
-    policy.constructionFailed();
+    auto p=std::shared_ptr<demo::NativeSurfacePolicy>(&policy,[](auto*){});
+    auto construction=std::async(std::launch::async,[&]{demo::NativePresenterCleanup::construct(p,[]()->std::shared_ptr<EmptyPresenter>{throw std::runtime_error("constructor unwound");});});
+    CHECK_THROWS(construction.get());
     CHECK(policy.canRelease());
     policy.releaseHost();
 }
@@ -82,9 +91,7 @@ TEST_CASE("native_surface/factory-host-survives-presenter-and-stale-lease-reject
     CHECK_THROWS(factory.releaseHost());
     CHECK(lease->policy->hostAlive());
     CHECK_FALSE(actualHost.isNull());
-    lease->policy->drained();
-    CHECK_THROWS(factory.releaseHost());
-    lease->policy->presenterDestroyed();
+    finish(*lease->policy);
     factory.releaseHost();
     CHECK(actualHost.isNull());
     CHECK_FALSE(lease->policy->hostAlive());
@@ -130,5 +137,66 @@ TEST_CASE("native_surface/create-in-progress-prevents-host-release-without-gui-w
     CHECK_THROWS(policy.releaseHost());
     resume.set_value();
     CHECK(operation.get() == surface);
-    policy.drained(); policy.presenterDestroyed(); policy.releaseHost();
+    finish(policy); policy.releaseHost();
+}
+
+TEST_CASE("native_surface/p4-invalidation-notifies-once-reentrant-and-serial") {
+ auto policy=std::make_shared<demo::NativeSurfacePolicy>();auto old=policy->invalidationSerial();int notifications=0;
+ policy->setInvalidationHandler([&](std::uint64_t serial){++notifications;CHECK(serial==old+1);CHECK_FALSE(policy->hostAlive());});
+ policy->invalidate();CHECK(notifications==1);CHECK(policy->invalidationSerial()==old+1);
+ policy->invalidate();CHECK(notifications==1);
+ CHECK_THROWS(policy->transfer(instance,[](VkInstance){return surface;}));
+ int replay=0;policy->setInvalidationHandler([&](auto){++replay;});CHECK(replay==1);
+ policy->releaseHost();
+}
+TEST_CASE("native_surface/p4-worker-cleanup-enforces-settle-flush-release-destroy") {
+ auto policy=std::make_shared<demo::NativeSurfacePolicy>();policy->transfer(instance,[](VkInstance){return surface;});
+ struct Presenter { std::vector<std::string>* stages; void flush(){stages->push_back("flush");} ~Presenter(){stages->push_back("destroy");} };
+ std::vector<std::string> stages;
+ auto presenter=std::shared_ptr<Presenter>(new Presenter{&stages});
+ auto worker=std::async(std::launch::async,[&]{demo::NativePresenterCleanup::run(policy,presenter,[&]{stages.push_back("settle");},[&]{CHECK_FALSE(policy->canRelease());stages.push_back("release-target-and-other-owners");});});
+ worker.get();
+ CHECK(stages==std::vector<std::string>{"settle","flush","release-target-and-other-owners","destroy"});
+ CHECK(policy->canRelease());policy->releaseHost();
+}
+
+TEST_CASE("native_surface/p4-cleanup-refuses-gui-and-surviving-presenter-owner") {
+ auto policy=std::make_shared<demo::NativeSurfacePolicy>();policy->transfer(instance,[](VkInstance){return surface;});
+ auto presenter=std::make_shared<EmptyPresenter>();
+ CHECK_THROWS(demo::NativePresenterCleanup::run(policy,presenter,[]{},[]{}));CHECK_FALSE(policy->canRelease());
+ auto other=presenter;
+ auto worker=std::async(std::launch::async,[&]{demo::NativePresenterCleanup::run(policy,presenter,[]{},[]{});});
+ CHECK_THROWS(worker.get());CHECK_FALSE(policy->canRelease());other.reset();
+ auto finish=std::async(std::launch::async,[&]{demo::NativePresenterCleanup::run(policy,presenter,[]{},[]{});});finish.get();
+ CHECK(policy->canRelease());policy->releaseHost();
+}
+
+TEST_CASE("native_surface/p4-construction-unwind-is-encapsulated-and-lease-retired") {
+ auto policy=std::make_shared<demo::NativeSurfacePolicy>();
+ auto worker=std::async(std::launch::async,[&]{
+  return demo::NativePresenterCleanup::construct(policy,[&]() -> std::shared_ptr<EmptyPresenter> {
+   policy->transfer(instance,[](VkInstance){return surface;});throw std::runtime_error("driver constructor unwound");
+  });
+ });
+ CHECK_THROWS(worker.get());CHECK(policy->canRelease());
+ bool driverCalled=false;CHECK_THROWS(policy->transfer(instance,[&](VkInstance){driverCalled=true;return surface;}));CHECK_FALSE(driverCalled);
+ if(policy->canRelease()) policy->releaseHost();
+}
+
+TEST_CASE("native_surface/p4-actual-factory-platform-event-notifies-session-boundary") {
+ bool called=false;demo::NativeSurfaceFactory factory([&](VkInstance){called=true;return surface;});
+ auto lease=factory.lease();int notifications=0;
+ demo::SessionState session;session.setViewport({{2,2},{2,2},1});session.start();
+ REQUIRE(session.presentationReady(session.snapshot()->generation,demo::PresentationPath::VulkanShared));
+ auto generation=session.snapshot()->generation;
+ lease->policy->setInvalidationHandler([&](auto){
+  ++notifications;CHECK(QThread::currentThread()==QCoreApplication::instance()->thread());
+  session.presentationInvalidated({demo::ErrorStage::Surface,true,"native host invalidated","platform event"});
+ });
+ QWindow* host=nullptr;for(auto window:QGuiApplication::allWindows()) if(window->title().startsWith("lrender native probe ")) host=window;
+ REQUIRE(host);QPlatformSurfaceEvent event(QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed);QCoreApplication::sendEvent(host,&event);
+ CHECK(notifications==1);CHECK_FALSE(lease->policy->hostAlive());CHECK_THROWS(lease->createSurface(instance));CHECK_FALSE(called);
+ CHECK_FALSE(session.canSubmit());CHECK(session.snapshot()->generation==generation+1);
+ CHECK_FALSE(session.presentationReady(generation,demo::PresentationPath::VulkanShared));
+ factory.releaseHost();CHECK(notifications==1);
 }

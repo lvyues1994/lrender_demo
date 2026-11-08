@@ -18,7 +18,7 @@ public:
     void setCamera(CameraState camera);
     void setRenderOptions(RenderOptions options);
     void setViewport(ViewportExtent viewport);
-    // Hiding a ready host retires its display epoch; showing waits for explicit
+    // Hiding any host retires its display epoch (including queued init/recovery); showing waits for explicit
     // readiness/revalidation. This does not itself recreate any GPU resource.
     void setVisible(bool visible);
     void pause();
