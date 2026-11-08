@@ -1,5 +1,7 @@
 #include "RenderSession.h"
 #include "FramePump.h"
+#include "AssetInstall.h"
+#include "assets/AssetLoader.h"
 #include "SessionFrameSubmit.h"
 #include "SessionState.h"
 #include <QCoreApplication>
@@ -57,7 +59,11 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
        targetFresh = false;
   bool tickQueued = false, noticeQueued = false, resourcesGone = false;
   SessionGeneration candidateGeneration = 0;
-  AssetLoader *loader = nullptr;
+  AssetLoader *loader = nullptr; // injection outlives this session through onStopped
+  std::unique_ptr<AssetInstall> installer;
+  std::map<AssetRequestId, LoadTicket> loads;
+  std::optional<AssetEntry> pendingLoad;
+  CpuAssetPtr readyAsset;
   std::shared_ptr<Impl> keepAlive;
   lqtexec::EventLoopContext gui;
   lexec::counting_scope root;
@@ -77,6 +83,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       throw std::logic_error("RenderSession requires GUI owner");
     if (!resources.runtime || !resources.renderer || !resources.world || !adapter)
       throw std::invalid_argument("RenderSession requires initialized resources and adapter");
+    installer = std::make_unique<AssetInstall>(*resources.world);
     cleanupScope = std::make_unique<lqtexec::ObjectScope>(this, gui.get_scheduler(), root.get_token());
     uiScope = std::make_unique<lqtexec::ObjectScope>(this, gui.get_scheduler(), root.get_token());
   }
@@ -88,6 +95,12 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     owner();
     auto value = std::make_shared<SessionSnapshot>(*state.snapshot());
     value->performance = performance;
+    value->installedModel = installer && installer->current()
+                                ? std::optional<ModelId>{installer->current()->model}
+                                : std::nullopt;
+    value->assetInstalling = installer && installer->active();
+    value->installationParts = installer ? installer->completedParts() : 0;
+    value->assetLoadsInFlight = loads.size();
     value->performance.inFlight = pump.inFlight();
     if (lastError)
       value->error = lastError;
@@ -264,6 +277,8 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   }
   void destroyResources(bool ambiguousBarrier) {
     phase = Destroying;
+    // All load receipts retired; only GUI touches World, even during terminal cleanup.
+    installer.reset();
     auto bundle = std::make_shared<Resources>(std::move(resources));
     auto self = shared_from_this();
     auto work = lexec::schedule(cleanupPool().get_scheduler()) | lexec::then([bundle]() noexcept {
@@ -301,11 +316,89 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
         std::unique_ptr<JoinOp>(new JoinOp(lexec::connect(root.join(), JoinReceiver{shared_from_this()})));
     lexec::start(*joinOp); // operation retained; completion posts final destruction to GUI
   }
+  void beginPendingLoad() {
+    if (!pendingLoad || blocked())
+      return;
+    auto entry = std::move(*pendingLoad);
+    pendingLoad.reset();
+    auto request = state.snapshot()->request;
+    auto weak = weak_from_this();
+    try {
+      // Journal allocation precedes launch. Assignment of the returned ticket is
+      // nonthrowing; a successful producer can never become an untracked job.
+      auto slot = loads.try_emplace(request, LoadTicket{request, {}}).first;
+      auto ticket = loader->beginLoad(std::move(entry), request, [weak](LoadOutcome outcome) {
+        if (auto self = weak.lock()) {
+          self->owner();
+          self->loads.erase(outcome.request);
+          if (!self->blocked() && self->state.acceptsAsset(outcome.request)) {
+            if (outcome.status == LoadStatus::Loaded)
+              self->readyAsset = std::move(outcome.asset);
+            else if (outcome.status == LoadStatus::Failed && outcome.error)
+              self->report(*outcome.error);
+          }
+          self->publish();
+          self->queueTick();
+        }
+      });
+      slot->second = std::move(ticket);
+    } catch (std::exception const &e) {
+      loads.erase(request);
+      report(issue(ErrorStage::Load, "load start failed", e.what()));
+    }
+    publish();
+  }
+  bool installStep() {
+    if (!readyAsset && !installer->active())
+      return false;
+    // No extraction/submit between first staged mutation and commit/rollback.
+    // Existing accepted work is not canceled, and must settle before mutation.
+    if (pump.inFlight())
+      return true;
+    if (readyAsset) {
+      auto candidate = std::move(readyAsset);
+      readyAsset.reset();
+      try {
+        installer->begin(std::move(candidate));
+      } catch (std::invalid_argument const &e) {
+        // begin's preflight precedes all World mutations: old scene remains usable.
+        report({ErrorStage::Load, true, "asset preflight rejected", e.what()});
+        queueTick();
+        return true;
+      } catch (std::exception const &e) {
+        fault(issue(ErrorStage::Load, "asset preflight failed closed", e.what()));
+        return true;
+      }
+    }
+    try {
+      if (installer->step(1)) {
+        installer->commit();
+        if (target) {
+          state.presentationInvalidated(
+              {ErrorStage::Surface, true, "asset committed", "fresh history after atomic scene replacement"});
+          rebuild = true;
+        }
+        performance.accumulatedSamples = 0;
+        pump.markDirty();
+      }
+      publish();
+      queueTick(); // bounded one part per GUI turn, not a polling wait
+    } catch (std::exception const &e) {
+      // Upstream resource allocators do not promise strong bad_alloc atomicity.
+      // Fail closed: never extract uncertain mutations or retry a resource delta.
+      readyAsset.reset();
+      fault(issue(ErrorStage::Load, "asset installation failed closed", e.what()));
+    }
+    return true;
+  }
   void tick() {
+    beginPendingLoad();
     if (phase == Stopped || phase == Joining || phase == Destroying || phase == Preparing ||
         phase == Probing || phase == Draining || phase == Releasing || phase == DrainFailed)
       return;
     if (stopRequested) {
+      if (!loads.empty())
+        return; // running CPU producers must actually retire
       if (unknownAcceptance && !overrideSubmit && pump.inFlight()) {
         // No result receiver could be attached: retire logical target then use actual
         // Renderer destruction as producer barrier. Existing plans own their target.
@@ -319,6 +412,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     }
     if (faulted)
       return;
+    if (installStep()) return;
     if (rebuild) {
       if (pump.inFlight() == 0)
         beginDrain();
@@ -455,6 +549,12 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     if (phase == Stopped || phase == Joining)
       return;
     stopRequested = true;
+    pendingLoad.reset();
+    readyAsset.reset();
+    for (auto const &job : loads)
+      job.second.cancel();
+    if (installer)
+      installer->rollback();
     state.requestStop();
     pump.stop();
     if (phase == DrainFailed)
@@ -531,13 +631,30 @@ void RenderSession::selectModel(ModelId id) {
   if (s.blocked())
     return;
   s.state.selectModel(std::move(id));
-  s.report(issue(ErrorStage::Load, "asset loading unavailable before P8",
-                 s.loader ? "loader injected but P8 decoding not implemented" : "no AssetLoader injected"));
+  for (auto const &job : s.loads)
+    job.second.cancel();
+  s.pendingLoad.reset();
+  s.readyAsset.reset();
+  s.installer->rollback();
+  if (!s.loader) {
+    s.report(issue(ErrorStage::Load, "asset loading unavailable", "no AssetLoader injected"));
+    return;
+  }
+  auto entry = AssetCatalog{}.describe(s.state.snapshot()->model.value());
+  if (auto e = std::get_if<RenderError>(&entry))
+    s.report(*e);
+  else
+    s.pendingLoad = std::get<AssetEntry>(std::move(entry));
+  s.queueTick();
+  s.publish();
 }
 void RenderSession::setAssetLoader(AssetLoader &loader) {
   impl_->owner();
-  if (!impl_->blocked())
+  if (!impl_->blocked()) {
+    if (!impl_->loads.empty())
+      throw std::logic_error("cannot replace AssetLoader with active loads");
     impl_->loader = &loader;
+  }
 }
 void RenderSession::setCamera(CameraState camera) {
   auto &s = *impl_;

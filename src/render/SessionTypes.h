@@ -46,6 +46,10 @@ struct SessionSnapshot {
     SessionGeneration generation = 0;
     std::optional<ModelId> model; // desired/requested model, not proof of World installation
     AssetRequestId request = 0;
+    std::optional<ModelId> installedModel; // committed World model, separate from desired model
+    bool assetInstalling = false;
+    std::size_t installationParts = 0;
+    std::size_t assetLoadsInFlight = 0;
     CameraState camera;
     RenderOptions options;
     PerformanceSnapshot performance;
