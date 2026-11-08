@@ -42,7 +42,7 @@ function(demo_register target label)
     set_tests_properties(${target} PROPERTIES SKIP_RETURN_CODE 77)
   endif()
 endfunction()
-add_executable(demo_tests tests/main.cpp tests/link_contract_test.cpp tests/state_test.cpp tests/presentation_test.cpp tests/frame_pump_test.cpp tests/session_test.cpp tests/obj_test.cpp tests/tga_test.cpp tests/asset_mapping_test.cpp tests/asset_async_test.cpp)
+add_executable(demo_tests tests/main.cpp tests/link_contract_test.cpp tests/state_test.cpp tests/presentation_test.cpp tests/frame_pump_test.cpp tests/session_test.cpp tests/obj_test.cpp tests/tga_test.cpp tests/asset_mapping_test.cpp tests/asset_async_test.cpp tests/ui_test.cpp)
 target_include_directories(demo_tests PRIVATE "${PROJECT_SOURCE_DIR}/third_party/doctest")
 target_link_libraries(demo_tests PRIVATE demo_core)
 demo_register(demo_tests unit)
@@ -57,12 +57,12 @@ add_test(NAME dependency_lock_sources COMMAND "${CMAKE_COMMAND}" -P "${PROJECT_S
 set_tests_properties(dependency_lock_sources PROPERTIES LABELS unit TIMEOUT 60)
 
 # Public native platform boundary remains a separate self-owned target.
-add_library(demo_native_surface STATIC src/presentation/NativeSurfaceFactory.cpp)
+add_library(demo_native_surface STATIC src/presentation/NativeSurfaceFactory.cpp src/presentation/VulkanSharedAdapter.cpp)
 find_package(Vulkan REQUIRED)
 find_path(DEMO_XCB_INCLUDE_DIR xcb/xcb.h REQUIRED)
 find_library(DEMO_XCB_LIBRARY xcb REQUIRED)
 target_include_directories(demo_native_surface PRIVATE "${DEMO_XCB_INCLUDE_DIR}")
-target_link_libraries(demo_native_surface PUBLIC demo_core Vulkan::Vulkan PRIVATE "${DEMO_XCB_LIBRARY}")
+target_link_libraries(demo_native_surface PUBLIC demo_core lr::present_vulkan Vulkan::Vulkan PRIVATE "${DEMO_XCB_LIBRARY}")
 target_sources(demo_tests PRIVATE tests/native_surface_policy_test.cpp)
 target_link_libraries(demo_tests PRIVATE demo_native_surface)
 
@@ -81,3 +81,10 @@ if(DEMO_ENABLE_STRICT_SHARED_TEST)
 endif()
 
 target_compile_definitions(demo_core PRIVATE DEMO_TINYRENDERER_ROOT="${PROJECT_SOURCE_DIR}/assets/sources/tinyrenderer")
+
+add_library(demo_ui STATIC src/ui/MainWindow.cpp src/ui/ViewportHost.cpp)
+target_link_libraries(demo_ui PUBLIC demo_native_surface)
+target_link_libraries(demo_tests PRIVATE demo_ui)
+
+add_executable(lrender_demo src/app/main.cpp)
+target_link_libraries(lrender_demo PRIVATE demo_ui)

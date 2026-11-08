@@ -13,6 +13,8 @@ class AssetInstall {
 public:
   explicit AssetInstall(lr::scene::World &);
   ~AssetInstall();
+  void setRoughness(float);
+  void setNormalMapping(bool);
   void begin(CpuAssetPtr);
   bool step(std::size_t maxParts);
   void commit();

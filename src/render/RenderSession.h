@@ -6,6 +6,10 @@ namespace demo {
 class AssetLoader; // P8 nonowning injection only; no invented implementation
 // Construct and issue serial commands on GUI; inputs are initialized owned resources.
 // Supply a serial-host World (no parallel-propagation waits on the GUI owner).
+// Textured dirty-only rendering requires Deterministic texture conversions and
+// a streaming budget fitting the bounded catalog batch (production main config).
+// A completion-driven texture follow-up settles conversions; temporal history is
+// retired once more after that receipt, never by resending extracted resources.
 // Shutdown is asynchronous: keep the application event loop alive through onStopped.
 // Destruction is noexcept. Off-owner destruction queues GUI detach/stop and diagnoses;
 // callback targets must stay valid until queued detach. No off-owner World/scope access.
@@ -21,8 +25,14 @@ public:
   ~RenderSession() noexcept;
   RenderSession(RenderSession const &) = delete;
   RenderSession &operator=(RenderSession const &) = delete;
+  void setPresentationMode(PresentationPath, bool allowFallback);
+  void setVisible(bool);
+  void invalidatePresentation(RenderError);
   void start();
   void selectModel(ModelId);
+  void setNormalMapping(bool);
+  void setAmbient(float);
+  void setRoughness(float);
   void setCamera(CameraState);
   void setRenderOptions(RenderOptions);
   void setViewport(ViewportExtent);

@@ -16,6 +16,10 @@ public:
  // Call only after target readiness; it neither creates nor resizes that target.
  virtual void setFrameContext(SessionGeneration, ViewportExtent const&) = 0;
  virtual void consumeImage(OwnedFrame) = 0;
+ // Actual WSI extent may differ from Qt rounding; called only after probe.
+ virtual ViewportExtent resolvedViewport(ViewportExtent value) const {return value;}
+ virtual PerformanceSnapshot presentationStats() const {return {};}
+
  virtual void beginDrain(Done) = 0;
  virtual void releasePath(Done) = 0;
 };

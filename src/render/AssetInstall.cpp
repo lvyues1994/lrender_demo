@@ -1,11 +1,14 @@
 #include "AssetInstall.h"
 #include <QCoreApplication>
 #include <QThread>
+#include <cmath>
 #include <stdexcept>
 namespace demo {
 struct AssetInstall::Impl {
   lr::scene::World &world;
   QThread *owner = QThread::currentThread();
+  std::optional<float> roughness;
+  bool normalMapping = true;
   struct Bundle {
     CpuAssetPtr asset;
     std::size_t next = 0;
@@ -53,6 +56,10 @@ struct AssetInstall::Impl {
     if (!id) {
       auto const &m = staged.asset->materials[index];
       auto d = m.factors;
+      if (roughness)
+        d.roughness = *roughness;
+      if (!normalMapping)
+        d.normalScale = 0;
       d.baseColorTexture = texture(m.baseColorTexture);
       d.normalTexture = texture(m.normalTexture);
       d.emissiveTexture = texture(m.emissiveTexture);
@@ -66,6 +73,61 @@ struct AssetInstall::Impl {
 AssetInstall::AssetInstall(lr::scene::World &w)
     : impl_(std::make_unique<Impl>(w)) {}
 AssetInstall::~AssetInstall() { clear(); }
+void AssetInstall::setNormalMapping(bool enabled) {
+  auto &s = *impl_;
+  s.check();
+  s.normalMapping = enabled;
+  auto update = [&](auto &b) {
+    if (!b.asset)
+      return;
+    for (std::size_t i = 0; i < b.materialMap.size(); ++i)
+      if (b.materialMap[i]) {
+        auto const &m = b.asset->materials[i];
+        auto d = m.factors;
+        if (s.roughness)
+          d.roughness = *s.roughness;
+        if (!enabled)
+          d.normalScale = 0;
+        auto texture = [&](auto index) -> std::optional<lr::core::TextureId> {
+          return index ? b.textureMap[*index] : std::nullopt;
+        };
+        d.baseColorTexture = texture(m.baseColorTexture);
+        d.normalTexture = texture(m.normalTexture);
+        d.emissiveTexture = texture(m.emissiveTexture);
+        s.world.resources().replaceMaterial(*b.materialMap[i], d);
+      }
+  };
+  update(s.installed);
+  update(s.staged);
+}
+void AssetInstall::setRoughness(float value) {
+  auto &s = *impl_;
+  s.check();
+  if (!std::isfinite(value) || value < 0 || value > 1)
+    throw std::invalid_argument("roughness requires finite [0,1]");
+  s.roughness = value;
+  auto update = [&](auto &bundle) {
+    if (!bundle.asset)
+      return;
+    for (std::size_t i = 0; i < bundle.materialMap.size(); ++i)
+      if (bundle.materialMap[i]) {
+        auto const &m = bundle.asset->materials[i];
+        auto d = m.factors;
+        d.roughness = value;
+        if (!s.normalMapping)
+          d.normalScale = 0;
+        auto texture = [&](auto index) -> std::optional<lr::core::TextureId> {
+          return index ? bundle.textureMap[*index] : std::nullopt;
+        };
+        d.baseColorTexture = texture(m.baseColorTexture);
+        d.normalTexture = texture(m.normalTexture);
+        d.emissiveTexture = texture(m.emissiveTexture);
+        s.world.resources().replaceMaterial(*bundle.materialMap[i], d);
+      }
+  };
+  update(s.installed);
+  update(s.staged);
+}
 void AssetInstall::begin(CpuAssetPtr a) {
   auto &s = *impl_;
   s.check();

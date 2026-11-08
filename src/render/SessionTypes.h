@@ -35,8 +35,9 @@ struct OwnedFrame { FrameStamp stamp; std::shared_ptr<lr::render::ImageRgba8 con
 struct PerformanceSnapshot {
     std::uint32_t inFlight = 0;
     std::uint32_t accumulatedSamples = 0; // actual latest accepted ViewStats, not fake GPU timing
+    std::uint64_t sampleOneFrames = 0; // accepted actual ViewStats receipts; survives snapshot coalescing
     std::uint64_t deltaExtractions = 0; // successful real World::extractDelta calls
-    std::uint64_t completed = 0, displayed = 0, dropped = 0;
+    std::uint64_t completed = 0, displayed = 0, dropped = 0, sharedShown = 0;
     double windowSeconds = 0;
     std::optional<double> hostPrepareMs, frameWallMs, presenterLatencyMs, gpuPassTotalMs;
 };
@@ -47,6 +48,7 @@ struct SessionSnapshot {
     std::optional<ModelId> model; // desired/requested model, not proof of World installation
     AssetRequestId request = 0;
     std::optional<ModelId> installedModel; // committed World model, separate from desired model
+    std::optional<lr::core::Aabb> assetBounds; // value-only reset framing, never World
     bool assetInstalling = false;
     std::size_t installationParts = 0;
     std::size_t assetLoadsInFlight = 0;

@@ -559,3 +559,109 @@ TEST_CASE(
   CHECK(world->resources().counts().materials == 0);
   CHECK(world->resources().counts().textures == 0);
 }
+
+TEST_CASE("asset_async/p9-material-override-keeps-real-texture-refs") {
+  auto world = lr::scene::makeWorld({});
+  AssetInstall install(*world);
+  install.setRoughness(.8f);
+  install.begin(fixture("old", 2));
+  REQUIRE(install.step(2));
+  install.commit();
+  auto delta = world->extractDelta();
+  REQUIRE(delta.materials.size() == 1);
+  CHECK(delta.materials[0].material.roughness == doctest::Approx(.8));
+  CHECK(delta.materials[0].material.normalTexture.has_value());
+  install.setRoughness(.3f);
+  delta = world->extractDelta();
+  REQUIRE(delta.materials.size() == 1);
+  CHECK(delta.materials[0].material.roughness == doctest::Approx(.3));
+  CHECK(world->resources().counts().textures == 2);
+  CHECK_THROWS_AS(install.setRoughness(-1), std::invalid_argument);
+  install.clear();
+}
+
+TEST_CASE("asset_async/p9-normal-material-command-preserves-texture-reference") {
+  auto world = lr::scene::makeWorld({});
+  AssetInstall install(*world);
+  install.begin(fixture("old", 1));
+  REQUIRE(install.step(1));
+  install.commit();
+  world->extractDelta();
+  install.setNormalMapping(false);
+  auto delta = world->extractDelta();
+  REQUIRE(delta.materials.size() == 1);
+  CHECK(delta.materials[0].material.normalScale == 0);
+  CHECK(delta.materials[0].material.normalTexture.has_value());
+  install.setNormalMapping(true);
+  delta = world->extractDelta();
+  REQUIRE(delta.materials.size() == 1);
+  CHECK(delta.materials[0].material.normalScale == 1);
+  install.clear();
+}
+
+TEST_CASE("asset_async/p9-texture-upload-gets-one-completion-driven-followup-not-reupload") {
+  App app([](auto const &e, auto) -> Result<CpuAssetPtr> { return fixture(e.id.value, 1); });
+  auto r = resources(app);
+  Harness h;
+  RenderSession session(std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()), h.fake(), h.events());
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  bool refreshed = test::until(
+      [&] {
+        for (std::size_t i = 0; i < h.frames.size(); ++i)
+          if (!h.frames[i].delta.textures.empty())
+            return h.frames.size() > i + 1;
+        return false;
+      },
+      300);
+  CHECK(refreshed);
+  unsigned uploads = 0;
+  for (auto const &f : h.frames)
+    uploads += !f.delta.textures.empty();
+  CHECK(uploads == 1);
+  stop(session, h);
+}
+TEST_CASE("asset_async/p9-roughness-command-does-not-reenable-disabled-normal-map") {
+  auto world = lr::scene::makeWorld({});
+  AssetInstall install(*world);
+  install.begin(fixture("old", 1));
+  REQUIRE(install.step(1));
+  install.commit();
+  world->extractDelta();
+  install.setNormalMapping(false);
+  world->extractDelta();
+  install.setRoughness(.7f);
+  auto delta = world->extractDelta();
+  REQUIRE(delta.materials.size() == 1);
+  CHECK(delta.materials[0].material.normalScale == 0);
+  CHECK(delta.materials[0].material.roughness == doctest::Approx(.7));
+  install.clear();
+}
+
+TEST_CASE("asset_async/p9-temporal-history-restarts-once-after-texture-settlement") {
+  App app([](auto const &e, auto) -> Result<CpuAssetPtr> { return fixture(e.id.value, 1); });
+  auto r = resources(app);
+  Harness h;
+  RenderSession session(std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()), h.fake(), h.events());
+  session.setAssetLoader(*app.loader);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] { return session.snapshot()->installedModel.has_value(); }));
+  session.setRenderOptions({PipelineKind::Pathtrace, 1, false});
+  start(session);
+  bool reset = test::until(
+      [&] {
+        if (h.frames.size() < 2)
+          return false;
+        return h.frames.back().views[0].target != h.frames.front().views[0].target;
+      },
+      300);
+  CHECK(reset);
+  unsigned payloads = 0;
+  for (auto const &frame : h.frames)
+    payloads += !frame.delta.textures.empty();
+  CHECK(payloads == 1);
+  stop(session, h);
+}

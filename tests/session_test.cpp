@@ -288,6 +288,7 @@ TEST_CASE("session/cpu_smoke-real-senders-owned-pixels-and-history") {
   REQUIRE(first != h.samples.end());
   CHECK(first->second == 1);
   auto firstSamples = first->second;
+  CHECK(s->snapshot()->performance.sampleOneFrames >= 2); // receipt counter survives coalesced UI snapshots
   stop(*s, h);
   REQUIRE(h.lastImage);
   auto image = ReadbackAdapter::copyImage(*h.lastImage->image);
@@ -765,4 +766,104 @@ TEST_CASE("session/fix-created-target-bind-fault-drains-releases-and-drops-keepa
   CHECK(e->releasedAfterDestroy);
   s.reset();
   REQUIRE(test::until([&] { return e->adapterDestroyed.load(); }));
+}
+
+TEST_CASE("session/p9-auto-fallback-is-observable-and-strict-mode-fails") {
+  for (bool automatic : {true, false}) {
+    Harness h;
+    auto r = resources();
+    std::vector<PresentationPath> paths;
+    struct Reject : ReadbackAdapter {
+      std::vector<PresentationPath> &paths;
+      bool rejected = false;
+      Reject(PresentationEvents e, std::vector<PresentationPath> &p) : ReadbackAdapter(e), paths(p) {}
+      void preparePath(PresentationPath p, std::shared_ptr<NativeHostLease> l, Done d) override {
+        paths.push_back(p);
+        rejected = p == PresentationPath::VulkanShared;
+        if (rejected)
+          d(RenderError{ErrorStage::Probe, true, "Capability injected", "missing external-memory"});
+        else
+          ReadbackAdapter::preparePath(p, l, std::move(d));
+      }
+      void beginDrain(Done d) override {
+        if (rejected)
+          d(std::monostate{});
+        else
+          ReadbackAdapter::beginDrain(std::move(d));
+      }
+      void releasePath(Done d) override {
+        if (rejected) {
+          rejected = false;
+          d(std::monostate{});
+        } else
+          ReadbackAdapter::releasePath(std::move(d));
+      }
+    };
+    RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+                    std::make_unique<Reject>(h.imageEvents(), paths), {}, h.events());
+    s.setPresentationMode(PresentationPath::VulkanShared, automatic);
+    start(s, false);
+    REQUIRE(test::until([&] { return h.images > 0 || s.snapshot()->life == LifeState::Failed; }));
+    REQUIRE_FALSE(paths.empty());
+    CHECK(paths[0] == PresentationPath::VulkanShared);
+    if (automatic) {
+      CHECK(h.images > 0);
+      CHECK(s.snapshot()->path == PresentationPath::Readback);
+      CHECK_FALSE(s.snapshot()->warnings.empty());
+    } else {
+      CHECK(h.images == 0);
+      CHECK(s.snapshot()->life == LifeState::Failed);
+    }
+    stop(s, h);
+  }
+}
+TEST_CASE("session/p9-hide-native-invalidate-retire-old-frames-and-rebuild") {
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() == 1; }));
+  auto old = s->snapshot()->generation;
+  s->setVisible(false);
+  h.complete(0);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  CHECK(h.images == 0);
+  CHECK(s->snapshot()->generation > old);
+  s->setViewport({{0, 0}, {0, 0}, 1});
+  s->setVisible(true);
+  auto count = h.jobs.size();
+  QCoreApplication::processEvents();
+  CHECK(h.jobs.size() == count);
+  s->setViewport({{8, 8}, {8, 8}, 1});
+  REQUIRE(test::until([&] { return h.jobs.size() == 2; }));
+  auto next = s->snapshot()->generation;
+  s->invalidatePresentation({ErrorStage::Surface, true, "Platform lost", "test invalid native lease"});
+  CHECK(s->snapshot()->generation > next);
+  h.complete(1);
+  s->requestStop();
+  REQUIRE(test::until([&] { return h.stopped; }));
+  CHECK(h.images == 0);
+}
+
+TEST_CASE("session/p9-lighting-value-command-updates-real-delta-without-camera-target-churn") {
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() == 1; }));
+  h.complete(0);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  auto generation = s->snapshot()->generation;
+  s->setAmbient(.5f);
+  CameraState camera;
+  camera.camera.position.x = 1;
+  s->setCamera(camera);
+  REQUIRE(test::until([&] { return h.jobs.size() == 2; }));
+  CHECK(h.jobs[1].frame.delta.environment.has_value());
+  if (h.jobs[1].frame.delta.environment)
+    CHECK(h.jobs[1].frame.delta.environment->radiance.x == doctest::Approx(.5));
+  CHECK(s->snapshot()->generation == generation);
+  CHECK_THROWS_AS(s->setAmbient(-1), std::invalid_argument);
+  CHECK_THROWS_AS(s->setRoughness(2), std::invalid_argument);
+  h.complete(1);
+  s->requestStop();
+  REQUIRE(test::until([&] { return h.stopped; }));
 }

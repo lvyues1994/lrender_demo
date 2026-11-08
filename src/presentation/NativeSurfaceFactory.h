@@ -1,15 +1,16 @@
 #pragma once
-#include <vulkan/vulkan.h>
-#include <QSize>
 #include <QObject>
-#include <functional>
+#include <QSize>
+#include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
-#include <string>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
+#include <vulkan/vulkan.h>
 class QWindow;
 class QWidget;
 namespace demo {
@@ -48,15 +49,18 @@ struct NativeHostLease {
 // The lease pins native connection metadata, never transfers Qt window ownership.
 class NativeSurfaceFactory final : public QObject {
 public:
-    explicit NativeSurfaceFactory(SurfaceCreator driverBoundary = {});
-    ~NativeSurfaceFactory() override;
-    std::shared_ptr<NativeHostLease> lease() const;
-    void setViewport(QSize logical);
-    void setVisible(bool visible);
-    QSize physicalExtent() const;
-    double devicePixelRatio() const;
-    bool exposed() const;
-    void releaseHost();
+  explicit NativeSurfaceFactory(SurfaceCreator driverBoundary = {}, QWidget *parent = nullptr,
+                                bool serializeBoundaryOnGui = false);
+  QWidget *widget() const { return container_.get(); }
+  QWindow *nativeWindow() const { return window_; }
+  ~NativeSurfaceFactory() override;
+  std::shared_ptr<NativeHostLease> lease() const;
+  void setViewport(QSize logical);
+  void setVisible(bool visible);
+  QSize physicalExtent() const;
+  double devicePixelRatio() const;
+  bool exposed() const;
+  void releaseHost();
 protected:
     bool eventFilter(QObject *, QEvent *) override;
 private:
@@ -66,6 +70,7 @@ private:
     QWindow *window_ = nullptr;
     QSize requested_{160, 120};
     std::function<int()> nativeMapState_;
+    std::function<QSize()> nativeExtent_;
 };
 // Worker-only ordered resource teardown. Primitive acknowledgements are private:
 // callers cannot report a flushed/destroyed presenter without passing this flow.
@@ -77,18 +82,34 @@ struct NativePresenterCleanup {
   try {return make();}
   catch(...) {policy->constructionFailed();throw;}
  }
- template<class Presenter,class Settle,class ReleaseOwners>
- static void run(std::shared_ptr<NativeSurfacePolicy> const& policy, std::shared_ptr<Presenter>& presenter,
-                 Settle settle,ReleaseOwners releaseOwners) {
-  policy->requireWorker();
-  if(!presenter) throw std::logic_error("cleanup requires a presenter");
-  settle();
-  presenter->flush();
-  policy->drained();
-  releaseOwners();
-  if(presenter.use_count()!=1) throw std::logic_error("presenter still has external owners after target teardown");
-  presenter.reset();
-  policy->presenterDestroyed();
+ template <class Presenter>
+ static void drain(std::shared_ptr<NativeSurfacePolicy> const &policy,
+                   std::shared_ptr<Presenter> const &presenter) {
+   policy->requireWorker();
+   presenter->flush();
+   policy->drained();
+ }
+ template <class Presenter, class Settle, class ReleaseOwners>
+ static void run(std::shared_ptr<NativeSurfacePolicy> const &policy, std::shared_ptr<Presenter> &presenter,
+                 Settle settle, ReleaseOwners releaseOwners,
+                 std::function<void(char const *, double)> measured = {}) {
+   policy->requireWorker();
+   if (!presenter)
+     throw std::logic_error("cleanup requires a presenter");
+   auto time = [&](char const *phase, auto f) {
+     auto start = std::chrono::steady_clock::now();
+     f();
+     if (measured)
+       measured(phase,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+   };
+   time("settle", settle);
+   time("flush", [&] { drain(policy, presenter); });
+   time("releaseOwners", releaseOwners);
+   if (presenter.use_count() != 1)
+     throw std::logic_error("presenter still has external owners after target teardown");
+   time("presenterDestructor", [&] { presenter.reset(); });
+   policy->presenterDestroyed();
  }
 };
 } // namespace demo

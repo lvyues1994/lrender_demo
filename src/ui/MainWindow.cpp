@@ -1,0 +1,129 @@
+#include "MainWindow.h"
+#include <QCheckBox>
+#include <QCloseEvent>
+#include <QComboBox>
+#include <QDoubleSpinBox>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <QSignalBlocker>
+#include <QVBoxLayout>
+namespace demo {
+MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
+  auto central = new QWidget;
+  auto layout = new QVBoxLayout(central);
+  auto controls = new QHBoxLayout;
+  model_ = new QComboBox;
+  model_->setObjectName("model");
+  model_->addItems({"african_head", "diablo", "boggie", "floor"});
+  pipeline_ = new QComboBox;
+  pipeline_->setObjectName("pipeline");
+  pipeline_->addItems({"Visibility", "Pathtrace"});
+  exposure_ = new QDoubleSpinBox;
+  exposure_->setObjectName("exposure");
+  exposure_->setRange(.01, 100);
+  exposure_->setValue(1);
+  exposure_->setSingleStep(.1);
+  taa_ = new QCheckBox("TAA");
+  auto reset = new QPushButton("Reset view");
+  controls->addWidget(model_);
+  controls->addWidget(pipeline_);
+  controls->addWidget(new QLabel("Exposure"));
+  controls->addWidget(exposure_);
+  controls->addWidget(taa_);
+  controls->addWidget(reset);
+  auto ambient = new QDoubleSpinBox;
+  ambient->setObjectName("ambient");
+  ambient->setRange(0, 8);
+  ambient->setValue(.25);
+  ambient->setSingleStep(.05);
+  auto roughness = new QDoubleSpinBox;
+  roughness->setObjectName("roughness");
+  roughness->setRange(0, 1);
+  roughness->setValue(.5);
+  roughness->setSingleStep(.05);
+  controls->addWidget(new QLabel("Ambient"));
+  controls->addWidget(ambient);
+  controls->addWidget(new QLabel("Roughness"));
+  controls->addWidget(roughness);
+  auto normals = new QCheckBox("Normal map");
+  normals->setObjectName("normal");
+  normals->setChecked(true);
+  controls->addWidget(normals);
+  connect(normals, &QCheckBox::toggled, this, [this](bool enabled) {
+    if (commands_.normalMapping)
+      commands_.normalMapping(enabled);
+  });
+  connect(ambient, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+          [this](double v) {
+            if (commands_.ambient)
+              commands_.ambient(float(v));
+          });
+  connect(roughness, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+          [this](double v) {
+            if (commands_.roughness)
+              commands_.roughness(float(v));
+          });
+  layout->addLayout(controls);
+  viewport_ = new ViewportHost(commands_);
+  layout->addWidget(viewport_, 1);
+  status_ = new QLabel("Preparing");
+  layout->addWidget(status_);
+  setCentralWidget(central);
+  resize(720, 560);
+  setWindowTitle("lrender · Qt Vulkan viewer");
+  connect(model_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+          [this](int) {
+            if (commands_.model)
+              commands_.model({model_->currentText().toStdString()});
+          });
+  connect(pipeline_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+          [this](int) { optionsChanged(); });
+  connect(exposure_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+          [this](double) { optionsChanged(); });
+  connect(taa_, &QCheckBox::toggled, this, [this](bool) { optionsChanged(); });
+  connect(reset, &QPushButton::clicked, this,
+          [this] { viewport_->resetCamera(bounds_); });
+}
+void MainWindow::optionsChanged() {
+  if (commands_.options)
+    commands_.options({pipeline_->currentIndex() == 1
+                           ? PipelineKind::Pathtrace
+                           : PipelineKind::Visibility,
+                       float(exposure_->value()), taa_->isChecked()});
+}
+void MainWindow::showSnapshot(SessionSnapshotPtr s) {
+  QSignalBlocker a(model_), b(pipeline_), c(exposure_), d(taa_);
+  if (s->model)
+    model_->setCurrentText(QString::fromStdString(s->model->value));
+  pipeline_->setCurrentIndex(s->options.pipeline == PipelineKind::Pathtrace);
+  exposure_->setValue(s->options.exposure);
+  taa_->setChecked(s->options.taa);
+  viewport_->showCamera(s->camera);
+  if (s->assetBounds)
+    bounds_ = *s->assetBounds;
+  status_->setText(QString::fromStdString(
+      s->backend + " / " + s->device + " | " +
+      (s->path == PresentationPath::VulkanShared ? "Shared" : "Readback") +
+      " | requested=" + (s->model ? s->model->value : "none") +
+      " installed=" + (s->installedModel ? s->installedModel->value : "none") +
+      (s->error ? " | " + s->error->message + ": " + s->error->cause : "") +
+      (s->warnings.empty() ? "" : " | " + s->warnings.back())));
+  if (s->life == LifeState::Stopped)
+    stopped_ = true;
+}
+void MainWindow::closeEvent(QCloseEvent *e) {
+  if (stopped_) {
+    e->accept();
+    return;
+  }
+  e->ignore();
+  if (!closing_) {
+    closing_ = true;
+    model_->setEnabled(false);
+    pipeline_->setEnabled(false);
+    if (commands_.stop)
+      commands_.stop();
+  }
+}
+} // namespace demo

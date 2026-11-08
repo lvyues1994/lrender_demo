@@ -209,3 +209,16 @@ TEST_CASE("native_surface/p6-throwing-invalidation-handler-is-contained-platform
  qInstallMessageHandler(old);
  CHECK_FALSE(policy.hostAlive());CHECK(captured.contains("Platform"));CHECK(captured.contains("observer failed"));policy.releaseHost();
 }
+
+TEST_CASE("native_surface/p9-timeout-never-calls-late-driver-with-unwound-instance") {
+ int driverCalls=0;
+ demo::NativeSurfaceFactory factory([&](VkInstance)->VkSurfaceKHR{++driverCalls;throw std::runtime_error("must not touch an unwound instance");},nullptr,true);
+ auto lease=factory.lease();
+ auto result=std::async(std::launch::async,[&]{return demo::NativePresenterCleanup::construct(lease->policy,[&]{return lease->createSurface(instance);});});
+ // Deliberately do not dispatch GUI events while its worker queue wait expires.
+ REQUIRE(result.wait_for(std::chrono::seconds(4))==std::future_status::ready);
+ CHECK_THROWS_WITH(result.get(),"Platform: surface GUI handshake timeout");
+ QCoreApplication::processEvents();
+ CHECK(driverCalls==0);
+ CHECK(lease->policy->canRelease());factory.releaseHost();
+}

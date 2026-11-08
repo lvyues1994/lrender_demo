@@ -1,14 +1,17 @@
 #include "RenderSession.h"
-#include "FramePump.h"
 #include "AssetInstall.h"
-#include "assets/AssetLoader.h"
+#include "FramePump.h"
 #include "SessionFrameSubmit.h"
 #include "SessionState.h"
+#include "assets/AssetLoader.h"
 #include <QCoreApplication>
 #include <QDebug>
 #include <QThread>
 #include <QTimer>
 #include <atomic>
+#include <chrono>
+#include <cmath>
+#include <iostream>
 #include <lqtexec/EventLoopContext.h>
 #include <map>
 namespace demo {
@@ -51,14 +54,21 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   struct Record {
     FrameStamp stamp;
     lr::core::RenderTargetId target;
+    bool texturePayload = false, textureSettling = false;
   };
   std::map<std::uint64_t, Record> outstanding;
   PerformanceSnapshot performance;
+  bool textureFollowupPending = false;
+  std::optional<std::chrono::steady_clock::time_point> receiptWaitStarted;
+  double receiptWaitMs = 0;
   std::optional<RenderError> lastError;
   bool started = false, stopRequested = false, faulted = false, unknownAcceptance = false, rebuild = false,
        targetFresh = false;
   bool tickQueued = false, noticeQueued = false, resourcesGone = false;
   SessionGeneration candidateGeneration = 0;
+  PresentationPath selectedPath = PresentationPath::Readback;
+  bool allowFallback = false, visible = true;
+  std::vector<std::string> presentationWarnings;
   AssetLoader *loader = nullptr; // injection outlives this session through onStopped
   std::unique_ptr<AssetInstall> installer;
   std::map<AssetRequestId, LoadTicket> loads;
@@ -95,10 +105,18 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     owner();
     auto value = std::make_shared<SessionSnapshot>(*state.snapshot());
     value->performance = performance;
+    auto display = adapter->presentationStats();
+    value->performance.displayed += display.displayed;
+    value->performance.sharedShown = display.sharedShown;
+    value->performance.dropped = display.dropped;
+    value->performance.presenterLatencyMs = display.presenterLatencyMs;
+    value->warnings.insert(value->warnings.end(), presentationWarnings.begin(), presentationWarnings.end());
     value->installedModel = installer && installer->current()
                                 ? std::optional<ModelId>{installer->current()->model}
                                 : std::nullopt;
     value->assetInstalling = installer && installer->active();
+    if (installer && installer->current())
+      value->assetBounds = installer->current()->bounds;
     value->installationParts = installer ? installer->completedParts() : 0;
     value->assetLoadsInFlight = loads.size();
     value->performance.inFlight = pump.inFlight();
@@ -152,6 +170,8 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     return e.logical.x > 0 && e.logical.y > 0 && e.physical.x > 0 && e.physical.y > 0;
   }
   void queueTick() {
+    if ((stopRequested || rebuild) && pump.inFlight() && !receiptWaitStarted)
+      receiptWaitStarted = std::chrono::steady_clock::now();
     if (tickQueued || phase == Stopped || phase == Joining)
       return;
     tickQueued = true;
@@ -173,16 +193,28 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       });
     };
   }
+  void presentationError(RenderError error) {
+    if (selectedPath == PresentationPath::VulkanShared && allowFallback && !stopRequested) {
+      presentationWarnings.push_back(error.message + ": " + error.cause);
+      selectedPath = PresentationPath::Readback;
+      state.presentationInvalidated(error);
+      rebuild = true;
+      publish();
+      queueTick(); // old path must drain/release before readback prepare
+    } else {
+      fault(error);
+      queueTick();
+    }
+  }
   void prepare() {
     phase = Preparing;
     candidateGeneration = state.snapshot()->generation;
     auto self = shared_from_this();
     adapter->preparePath(
-        PresentationPath::Readback, {}, control([](Impl &s, auto result) {
+        selectedPath, {}, control([](Impl &s, auto result) {
           if (auto e = std::get_if<RenderError>(&result)) {
             s.phase = Ready;
-            s.fault(*e);
-            s.queueTick();
+            s.presentationError(*e);
             return;
           }
           if (s.stopRequested) {
@@ -201,8 +233,12 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
               auto &s = *owner;
               s.phase = Ready;
               if (auto e = std::get_if<RenderError>(&result)) {
-                s.fault(*e);
-                s.queueTick();
+                s.presentationError(*e);
+                return;
+              }
+              auto const report = std::get<ProbeReport>(result);
+              if (s.selectedPath == PresentationPath::VulkanShared && !report.shared) {
+                s.presentationError({ErrorStage::Probe, true, "Capability: shared rejected", report.reason});
                 return;
               }
               if (s.stopRequested || !s.area() || s.state.snapshot()->generation != s.candidateGeneration) {
@@ -211,13 +247,20 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
                 return;
               }
               try {
+                auto resolved = s.adapter->resolvedViewport(s.state.viewport());
+                auto old = s.state.viewport();
+                if (resolved.physical.x != old.physical.x || resolved.physical.y != old.physical.y) {
+                  s.state.setViewport(resolved);
+                  s.candidateGeneration = s.state.snapshot()->generation;
+                }
                 auto desc = s.adapter->describeTarget(s.state.viewport());
-                if (!std::holds_alternative<lr::render::ImageTargetDesc>(desc))
-                  throw std::runtime_error("P6 requires owned readback target; Vulkan adapter is P9");
-                s.target =
-                    s.resources.renderer->targets().createImage(std::get<lr::render::ImageTargetDesc>(desc));
+                if (auto image = std::get_if<lr::render::ImageTargetDesc>(&desc))
+                  s.target = s.resources.renderer->targets().createImage(*image);
+                else
+                  s.target = s.resources.renderer->targets().createWindow(
+                      std::get<lr::render::WindowTargetDesc>(desc));
                 s.adapter->setFrameContext(s.candidateGeneration, s.state.viewport());
-                if (!s.state.presentationReady(s.candidateGeneration, PresentationPath::Readback,
+                if (!s.state.presentationReady(s.candidateGeneration, s.selectedPath,
                                                s.resources.renderer->deviceInfo().backend,
                                                s.resources.renderer->deviceInfo().deviceName))
                   throw std::runtime_error("stale presentation candidate");
@@ -228,7 +271,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
                 s.queueTick();
                 s.publish();
               } catch (std::exception const &e) {
-                s.fault(issue(ErrorStage::Surface, "target preparation failed", e.what()));
+                s.presentationError(issue(ErrorStage::Surface, "target preparation failed", e.what()));
               }
             });
           });
@@ -236,12 +279,21 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   }
   void destroyTarget() {
     if (target) {
+      auto started = std::chrono::steady_clock::now();
       resources.renderer->targets().destroy(*target);
       target.reset();
+      std::cout
+          << "cleanup phase=targetDestroy wallMs="
+          << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count()
+          << std::endl;
     }
     targetFresh = false;
   }
   void beginDrain() {
+    std::cout << "cleanup phase=waitSubmitReceipts wallMs=" << receiptWaitMs
+              << " inFlight=" << pump.inFlight() << std::endl;
+    receiptWaitMs = 0;
+    receiptWaitStarted.reset();
     phase = Draining;
     adapter->beginDrain(control([](Impl &s, auto result) {
       if (auto e = std::get_if<RenderError>(&result)) {
@@ -281,13 +333,22 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     installer.reset();
     auto bundle = std::make_shared<Resources>(std::move(resources));
     auto self = shared_from_this();
-    auto work = lexec::schedule(cleanupPool().get_scheduler()) | lexec::then([bundle]() noexcept {
-                  // External fixed worker: never Runtime's own pool or the Renderer GPU thread.
-                  // Renderer destructor joins actual queued producers and clears GPU frames.
-                  bundle->renderer.reset();
-                  bundle->world.reset();
-                  bundle->runtime.reset();
-                });
+    auto work =
+        lexec::schedule(cleanupPool().get_scheduler()) | lexec::then([bundle]() noexcept {
+          // External fixed worker: never Runtime's own pool or the Renderer GPU thread.
+          // Renderer destructor joins actual queued producers and clears GPU frames.
+          auto measured = [](char const *phase, auto f) {
+            auto start = std::chrono::steady_clock::now();
+            f();
+            std::cout
+                << "cleanup phase=" << phase << " wallMs="
+                << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count()
+                << std::endl;
+          };
+          measured("rendererDestructor", [&] { bundle->renderer.reset(); });
+          measured("worldDestructor", [&] { bundle->world.reset(); });
+          measured("runtimeDestructor", [&] { bundle->runtime.reset(); });
+        });
     lexec::spawn(lqtexec::then_on(std::move(work), *cleanupScope,
                                   [self, ambiguousBarrier]() noexcept {
                                     self->resourcesGone = true;
@@ -412,14 +473,15 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     }
     if (faulted)
       return;
-    if (installStep()) return;
+    if (installStep())
+      return;
     if (rebuild) {
       if (pump.inFlight() == 0)
         beginDrain();
       return;
     }
     if (phase == Idle) {
-      if (started && area())
+      if (started && area() && visible)
         prepare();
       return;
     }
@@ -437,6 +499,11 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
         ++performance.deltaExtractions;
       }
       frame.delta = *pending;
+      auto &admission = outstanding.at(stamp->sequence);
+      admission.texturePayload = !frame.delta.textures.empty();
+      admission.textureSettling = textureFollowupPending && !admission.texturePayload;
+      if (admission.texturePayload || admission.textureSettling)
+        textureFollowupPending = false;
       lr::render::ViewDesc view;
       auto current = state.snapshot();
       view.id = stamp->view;
@@ -500,11 +567,29 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     auto record = found->second;
     outstanding.erase(found);
     pump.complete(record.stamp);
+    if (!pump.inFlight() && receiptWaitStarted) {
+      receiptWaitMs +=
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - *receiptWaitStarted)
+              .count();
+      receiptWaitStarted.reset();
+    }
     ++performance.completed;
     if (auto e = std::get_if<RenderError>(&completion.result))
       fault(*e);
     else {
       auto result = std::get<lr::render::FrameResult>(std::move(completion.result));
+      // Renderer.h ConversionDelivery::Deterministic delivers conversions in the
+      // next frame, not the upload frame. Exactly one completion-driven refresh;
+      // no repeated delta, timer polling, or unbounded resource retransmission.
+      if (!blocked() && record.texturePayload) {
+        textureFollowupPending = true;
+        pump.markDirty();
+      }
+      if (!blocked() && record.textureSettling && record.stamp.generation == state.snapshot()->generation) {
+        auto o = state.snapshot()->options;
+        if (o.pipeline == PipelineKind::Pathtrace || o.taa)
+          sceneParametersChanged();
+      }
       if (resources.world && !blocked() && !result.lostTextures.empty()) {
         resources.world->resources().resubmitTextures(result.lostTextures);
         pump.markDirty();
@@ -515,10 +600,13 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
           fault(issue(ErrorStage::Submit, "invalid frame view result", "view/target routing mismatch"));
         else {
           performance.accumulatedSamples = result.views[0].stats.accumulatedSamples;
+          if (performance.accumulatedSamples == 1)
+            ++performance.sampleOneFrames;
           if (result.views[0].image) {
             auto image = std::make_shared<lr::render::ImageRgba8 const>(std::move(*result.views[0].image));
             try {
               adapter->consumeImage({record.stamp, std::move(image)});
+              ++performance.displayed;
             } catch (std::exception const &e) {
               fault(issue(ErrorStage::Present, "image observer failed", e.what()));
             } catch (...) {
@@ -530,6 +618,17 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     }
     publish();
     queueTick();
+  }
+  void sceneParametersChanged() {
+    auto o = state.snapshot()->options;
+    if (target && (o.pipeline == PipelineKind::Pathtrace || o.taa)) {
+      state.presentationInvalidated(
+          {ErrorStage::Surface, true, "scene parameter history reset", "fresh temporal target"});
+      rebuild = true;
+    }
+    pump.markDirty();
+    queueTick();
+    publish();
   }
   void historyChange(bool temporalTransition = false) {
     // A camera-only update has no temporal history in plain visibility. Keep its
@@ -614,6 +713,38 @@ RenderSession::~RenderSession() noexcept {
     }
   }
 }
+void RenderSession::setPresentationMode(PresentationPath path, bool fallback) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.started)
+    throw std::logic_error("presentation policy is startup-only");
+  s.selectedPath = path;
+  s.allowFallback = fallback;
+}
+void RenderSession::setVisible(bool visible) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked() || s.visible == visible)
+    return;
+  s.visible = visible;
+  s.state.setVisible(visible);
+  if (!visible)
+    s.rebuild = true;
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+}
+void RenderSession::invalidatePresentation(RenderError error) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked())
+    return;
+  s.state.presentationInvalidated(error);
+  s.rebuild = true;
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+}
 void RenderSession::start() {
   auto &s = *impl_;
   s.owner();
@@ -654,6 +785,46 @@ void RenderSession::setAssetLoader(AssetLoader &loader) {
     if (!impl_->loads.empty())
       throw std::logic_error("cannot replace AssetLoader with active loads");
     impl_->loader = &loader;
+  }
+}
+void RenderSession::setNormalMapping(bool enabled) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked())
+    return;
+  try {
+    s.installer->setNormalMapping(enabled);
+    s.sceneParametersChanged();
+  } catch (std::exception const &e) {
+    s.fault(issue(ErrorStage::Submit, "normal material mutation failed closed", e.what()));
+  }
+}
+void RenderSession::setAmbient(float intensity) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked())
+    return;
+  if (!std::isfinite(intensity) || intensity < 0)
+    throw std::invalid_argument("ambient radiance requires finite >=0");
+  try {
+    s.resources.world->setEnvironment({lr::core::vec3{intensity}});
+    s.sceneParametersChanged();
+  } catch (std::exception const &e) {
+    s.fault(issue(ErrorStage::Submit, "lighting mutation failed closed", e.what()));
+  }
+}
+void RenderSession::setRoughness(float roughness) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked())
+    return;
+  if (!std::isfinite(roughness) || roughness < 0 || roughness > 1)
+    throw std::invalid_argument("roughness requires finite [0,1]");
+  try {
+    s.installer->setRoughness(roughness);
+    s.sceneParametersChanged();
+  } catch (std::exception const &e) {
+    s.fault(issue(ErrorStage::Submit, "material mutation failed closed", e.what()));
   }
 }
 void RenderSession::setCamera(CameraState camera) {

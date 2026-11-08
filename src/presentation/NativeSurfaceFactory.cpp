@@ -3,14 +3,17 @@
 #include <QApplication>
 #include <QDebug>
 #include <QEvent>
+#include <QMetaObject>
 #include <QPlatformSurfaceEvent>
 #include <QThread>
 #include <QUuid>
 #include <QWidget>
 #include <QWindow>
-#include <xcb/xcb.h>
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <stdexcept>
+#include <xcb/xcb.h>
 namespace demo {
 NativeSurfacePolicy::NativeSurfacePolicy() : owner_(std::this_thread::get_id()) {}
 void NativeSurfacePolicy::requireOwner() const {
@@ -103,75 +106,138 @@ struct Connection {
     xcb_connection_t *value = nullptr;
     ~Connection() { if (value) xcb_disconnect(value); }
 };
-SurfaceCreator xcbCreator(QWindow &window, std::function<int()> &mapState) {
-    if (QGuiApplication::platformName() != "xcb")
-        throw std::runtime_error("Platform: Unsupported Qt platform; only public xcb bridge is validated");
-    auto connection = std::make_shared<Connection>();
-    connection->value = xcb_connect(nullptr, nullptr);
-    if (xcb_connection_has_error(connection->value))
-        throw std::runtime_error("Platform: cannot connect to the Qt DISPLAY server");
-    auto const id = static_cast<xcb_window_t>(window.winId());
-    QGuiApplication::sync();
-    // Verify this independent public XCB connection resolves the exact Qt window,
-    // not an accidental XID on a different DISPLAY. The title contains a unique UUID.
-    auto const atomName = QByteArray("_NET_WM_NAME");
-    auto atom = xcb_intern_atom_reply(connection->value,
-        xcb_intern_atom(connection->value, false, atomName.size(), atomName.constData()), nullptr);
-    if (!atom) throw std::runtime_error("Platform: cannot query Qt window identity");
-    auto reply = xcb_get_property_reply(connection->value,
-        xcb_get_property(connection->value, false, id, atom->atom, XCB_GET_PROPERTY_TYPE_ANY, 0, 256), nullptr);
-    std::free(atom);
-    QByteArray actual;
-    if (reply) actual = QByteArray(static_cast<char const *>(xcb_get_property_value(reply)), xcb_get_property_value_length(reply));
-    std::free(reply);
-    if (actual != window.title().toUtf8())
-        throw std::runtime_error("Platform: XCB connection does not identify the same Qt native window");
-    auto geometry = xcb_get_geometry_reply(connection->value, xcb_get_geometry(connection->value, id), nullptr);
-    if (!geometry) throw std::runtime_error("Platform: Qt native window has no XCB geometry");
+SurfaceCreator xcbCreator(QWindow &window, std::function<int()> &mapState, std::function<QSize()> &physical) {
+  if (QGuiApplication::platformName() != "xcb")
+    throw std::runtime_error("Platform: Unsupported Qt platform; only public xcb bridge is validated");
+  auto connection = std::make_shared<Connection>();
+  connection->value = xcb_connect(nullptr, nullptr);
+  if (xcb_connection_has_error(connection->value))
+    throw std::runtime_error("Platform: cannot connect to the Qt DISPLAY server");
+  auto const id = static_cast<xcb_window_t>(window.winId());
+  qInfo() << "native bridge XID=" << id << " title=" << window.title();
+  QGuiApplication::sync();
+  // Verify this independent public XCB connection resolves the exact Qt window,
+  // not an accidental XID on a different DISPLAY. The title contains a unique UUID.
+  auto const atomName = QByteArray("_NET_WM_NAME");
+  auto atom = xcb_intern_atom_reply(
+      connection->value, xcb_intern_atom(connection->value, false, atomName.size(), atomName.constData()),
+      nullptr);
+  if (!atom)
+    throw std::runtime_error("Platform: cannot query Qt window identity");
+  auto reply = xcb_get_property_reply(
+      connection->value,
+      xcb_get_property(connection->value, false, id, atom->atom, XCB_GET_PROPERTY_TYPE_ANY, 0, 256), nullptr);
+  std::free(atom);
+  QByteArray actual;
+  if (reply)
+    actual = QByteArray(static_cast<char const *>(xcb_get_property_value(reply)),
+                        xcb_get_property_value_length(reply));
+  std::free(reply);
+  if (actual != window.title().toUtf8())
+    throw std::runtime_error("Platform: XCB connection does not identify the same Qt native window");
+  auto geometry = xcb_get_geometry_reply(connection->value, xcb_get_geometry(connection->value, id), nullptr);
+  if (!geometry)
+    throw std::runtime_error("Platform: Qt native window has no XCB geometry");
+  std::free(geometry);
+  mapState = [connection, id] {
+    auto attrs = xcb_get_window_attributes_reply(connection->value,
+                                                 xcb_get_window_attributes(connection->value, id), nullptr);
+    if (!attrs)
+      throw std::runtime_error("Platform: native XCB window attributes unavailable");
+    int state = attrs->map_state;
+    std::free(attrs);
+    return state;
+  };
+  physical = [connection, id] {
+    auto geometry =
+        xcb_get_geometry_reply(connection->value, xcb_get_geometry(connection->value, id), nullptr);
+    if (!geometry)
+      throw std::runtime_error("Platform: native geometry unavailable");
+    QSize pixels(geometry->width, geometry->height);
     std::free(geometry);
-    mapState = [connection, id] {
-        auto attrs = xcb_get_window_attributes_reply(connection->value,
-            xcb_get_window_attributes(connection->value, id), nullptr);
-        if (!attrs) throw std::runtime_error("Platform: native XCB window attributes unavailable");
-        int state = attrs->map_state;
-        std::free(attrs);
-        return state;
-    };
-    return [connection, id](VkInstance instance) {
-        auto create = reinterpret_cast<PFN_vkCreateXcbSurfaceKHR>(vkGetInstanceProcAddr(instance, "vkCreateXcbSurfaceKHR"));
-        if (!create) throw std::runtime_error("Platform: VK_KHR_xcb_surface was not enabled");
-        VkXcbSurfaceCreateInfoKHR info{};
-        info.sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR;
-        info.connection = connection->value;
-        info.window = id;
-        VkSurfaceKHR surface = VK_NULL_HANDLE;
-        auto result = create(instance, &info, nullptr, &surface);
-        if (result != VK_SUCCESS)
-            throw std::runtime_error("Surface: vkCreateXcbSurfaceKHR failed: " + std::to_string(result));
-        return surface;
-    };
+    return pixels;
+  };
+  return [connection, id](VkInstance instance) {
+    auto create =
+        reinterpret_cast<PFN_vkCreateXcbSurfaceKHR>(vkGetInstanceProcAddr(instance, "vkCreateXcbSurfaceKHR"));
+    if (!create)
+      throw std::runtime_error("Platform: VK_KHR_xcb_surface was not enabled");
+    VkXcbSurfaceCreateInfoKHR info{};
+    info.sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR;
+    info.connection = connection->value;
+    info.window = id;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    auto result = create(instance, &info, nullptr, &surface);
+    if (result != VK_SUCCESS)
+      throw std::runtime_error("Surface: vkCreateXcbSurfaceKHR failed: " + std::to_string(result));
+    return surface;
+  };
 }
 } // namespace
-NativeSurfaceFactory::NativeSurfaceFactory(SurfaceCreator driverBoundary) {
-    requireGui();
-    lease_ = std::make_shared<NativeHostLease>();
-    lease_->policy = std::make_shared<NativeSurfacePolicy>();
-    auto window = std::make_unique<QWindow>();
-    window->setSurfaceType(QSurface::RasterSurface); // no Qt renderer, VkInstance or Qt-owned VkSurface
-    window->setTitle("lrender native probe " + QUuid::createUuid().toString());
-    window_ = window.get();
-    container_.reset(QWidget::createWindowContainer(window.release())); // documented ownership transfer
-    container_->resize(requested_);
-    container_->show();
-    if (!driverBoundary) {
-        driverBoundary = xcbCreator(*window_, nativeMapState_);
-        lease_->instanceExtensions = {VK_KHR_XCB_SURFACE_EXTENSION_NAME}; // presenter adds KHR_surface
-    }
-    auto policy = lease_->policy;
-    lease_->createSurface = [policy, create = std::move(driverBoundary)](VkInstance instance) {
-        return policy->transfer(instance, create);
-    };
-    window_->installEventFilter(this);
+NativeSurfaceFactory::NativeSurfaceFactory(SurfaceCreator driverBoundary, QWidget *parent,
+                                           bool serializeBoundaryOnGui) {
+  requireGui();
+  lease_ = std::make_shared<NativeHostLease>();
+  lease_->policy = std::make_shared<NativeSurfacePolicy>();
+  auto window = std::make_unique<QWindow>();
+  window->setSurfaceType(QSurface::RasterSurface); // no Qt renderer, VkInstance or Qt-owned VkSurface
+  window->setTitle("lrender native probe " + QUuid::createUuid().toString());
+  window_ = window.get();
+  container_.reset(QWidget::createWindowContainer(window.release(), parent)); // documented ownership transfer
+  container_->resize(requested_);
+  container_->show();
+  bool const guiBridge = serializeBoundaryOnGui || !driverBoundary;
+  if (!driverBoundary) {
+    driverBoundary = xcbCreator(*window_, nativeMapState_, nativeExtent_);
+    lease_->instanceExtensions = {VK_KHR_XCB_SURFACE_EXTENSION_NAME}; // presenter adds KHR_surface
+  }
+  auto policy = lease_->policy;
+  lease_->createSurface = [policy, create = std::move(driverBoundary), guiBridge](VkInstance instance) {
+    if (!guiBridge)
+      return policy->transfer(instance, create);
+    // Only host-surface creation is serialized with Qt native invalidation.
+    // Presenter/device construction stays on the worker. GUI never waits.
+    return policy->transfer(instance, [policy, create](VkInstance instance) {
+      struct Handshake {
+        std::mutex mutex;
+        std::condition_variable wake;
+        bool ready = false, abandoned = false;
+        VkSurfaceKHR surface = VK_NULL_HANDLE;
+        std::exception_ptr error;
+      };
+      auto receipt = std::make_shared<Handshake>();
+      QMetaObject::invokeMethod(
+          qApp,
+          [receipt, policy, create, instance] {
+            // Keep the borrowed VkInstance alive through the native call: the
+            // worker cannot time out/unwind it while this lock is held. A queue
+            // timeout abandons only a not-yet-started call, never an active one.
+            std::unique_lock<std::mutex> lock(receipt->mutex);
+            if (receipt->abandoned)
+              return;
+            try {
+              if (!policy->hostAlive())
+                throw std::runtime_error("Platform: invalidated lease before GUI surface creation");
+              receipt->surface = create(instance);
+            } catch (...) {
+              receipt->error = std::current_exception();
+            }
+            receipt->ready = true;
+            lock.unlock();
+            receipt->wake.notify_all();
+          },
+          Qt::QueuedConnection);
+      std::unique_lock<std::mutex> lock(receipt->mutex);
+      if (!receipt->wake.wait_for(lock, std::chrono::seconds(3), [&] { return receipt->ready; })) {
+        receipt->abandoned = true;
+        throw std::runtime_error("Platform: surface GUI handshake timeout");
+      }
+      if (receipt->error)
+        std::rethrow_exception(receipt->error);
+      return receipt->surface;
+    });
+  };
+  window_->installEventFilter(this);
 }
 NativeSurfaceFactory::~NativeSurfaceFactory() {
     if (!lease_->policy->canRelease())
@@ -198,6 +264,8 @@ void NativeSurfaceFactory::setVisible(bool visible) {
 QSize NativeSurfaceFactory::physicalExtent() const {
     requireGui();
     if (!window_ || requested_.width() <= 0 || requested_.height() <= 0) return {};
+    if (nativeExtent_)
+      return nativeExtent_(); // actual XCB pixels, no fractional-DPR rounding guess
     return QSize(qRound(window_->width() * window_->devicePixelRatio()), qRound(window_->height() * window_->devicePixelRatio()));
 }
 double NativeSurfaceFactory::devicePixelRatio() const { requireGui(); return window_ ? window_->devicePixelRatio() : 1.0; }

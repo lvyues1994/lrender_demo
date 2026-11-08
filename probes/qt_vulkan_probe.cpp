@@ -175,9 +175,10 @@ int main(int argc, char **argv) {
                                   << " completed=" << completed << " maxInFlight=" << maxInFlight << '\n';
                         if(stats.sharedShown==0 && submitted!=0) accountingError="Synchronization: sharedShown stayed zero";
                         if(code==0 && stats.shown+stats.dropped!=submitted) accountingError+=" Synchronization: presenter accounting lost a submitted frame";
-                        if(target) {renderer->targets().destroy(*target);target.reset();}
-                        renderer.reset();runtime.reset();
-                    });
+                        measured("target-destruction",[&]{if(target){renderer->targets().destroy(*target);target.reset();}});
+                        measured("renderer-destruction",[&]{renderer.reset();});
+                        measured("runtime-destruction",[&]{runtime.reset();});
+                    },[&](char const* phase,double ms){std::cout<<"cleanupSubphase="<<phase<<" wallMs="<<ms<<'\n';});
                 });
             } else {
                 settle();
