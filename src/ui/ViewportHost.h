@@ -10,8 +10,11 @@ struct UiCommands {
   std::function<void(RenderOptions)> options;
   std::function<void(ViewportExtent, bool)> viewport;
   std::function<void()> stop;
-  std::function<void(float)> ambient, roughness;
-  std::function<void(bool)> normalMapping;
+  // GUI-serialized commands return the authoritative applied value, including
+  // rejection. Publication may be queued; a requested value is never treated as
+  // confirmation.
+  std::function<float(float)> ambient, roughness;
+  std::function<bool(bool)> normalMapping;
   std::function<void(RenderError)> invalidated;
 };
 class ViewportHost : public QWidget {

@@ -179,8 +179,8 @@ TEST_CASE("ui/shared-capability-failure-does-not-create-native-host-and-can-reti
 TEST_CASE("ui/basic-light-and-material-controls-emit-value-commands") {
   float ambient = -1, roughness = -1;
   UiCommands commands;
-  commands.ambient = [&](float v) { ambient = v; };
-  commands.roughness = [&](float v) { roughness = v; };
+  commands.ambient = [&](float v) { return ambient = v; };
+  commands.roughness = [&](float v) { return roughness = v; };
   MainWindow window(commands);
   auto a = window.findChild<QDoubleSpinBox *>("ambient");
   auto r = window.findChild<QDoubleSpinBox *>("roughness");
@@ -233,9 +233,9 @@ TEST_CASE("ui/real-gui-surface-handshake-serializes-injected-driver-boundary") {
 TEST_CASE("ui/p10-appearance-sync-and-rejected-command-no-feedback") {
   int commands = 0;
   UiCommands c;
-  c.ambient = [&](float) { ++commands; };
-  c.roughness = [&](float) { ++commands; };
-  c.normalMapping = [&](bool) { ++commands; };
+  c.ambient = [&](float) { ++commands; return .8f; };
+  c.roughness = [&](float) { ++commands; return .2f; };
+  c.normalMapping = [&](bool) { ++commands; return false; };
   MainWindow window(c);
   auto snap = std::make_shared<SessionSnapshot>();
   snap->ambient = .8f;
@@ -279,7 +279,7 @@ TEST_CASE("ui/p10-performance-is-labelled-not-fake-gpu-or-scanout") {
   auto text = label->text();
   CHECK(text.contains("completion FPS"));
   CHECK(text.contains("CPU GUI prepare"));
-  CHECK(text.contains("submit-to-device"));
+  CHECK(text.contains("submit-to-renderer"));
   CHECK(text.contains("GPU unavailable"));
   CHECK(text.contains("inflight=1"));
   CHECK(text.contains("dropped=2"));
@@ -289,4 +289,158 @@ TEST_CASE("ui/p10-performance-is-labelled-not-fake-gpu-or-scanout") {
   CHECK(label->text().contains("GPU pass sum"));
   CHECK(label->text().contains("profiling serializes"));
   CHECK_FALSE(label->text().contains("GPU unavailable"));
+}
+
+#include <QKeyEvent>
+#include <QLineEdit>
+#include <QTimer>
+namespace {
+void appearanceKey(QWidget *w, int key, QString text = {},
+                   Qt::KeyboardModifiers mods = Qt::NoModifier) {
+  QKeyEvent press(QEvent::KeyPress, key, mods, text);
+  QApplication::sendEvent(w, &press);
+  QKeyEvent release(QEvent::KeyRelease, key, mods, text);
+  QApplication::sendEvent(w, &release);
+}
+void appearanceText(QLineEdit *edit, QString text) {
+  appearanceKey(edit, Qt::Key_A, {}, Qt::ControlModifier);
+  for (auto ch : text)
+    appearanceKey(edit, ch.unicode(), QString(ch));
+}
+} // namespace
+TEST_CASE(
+    "ui/"
+    "p10-fix-keyboard-draft-survives-periodic-snapshot-and-delayed-publish") {
+  auto confirmed = std::make_shared<SessionSnapshot>();
+  confirmed->ambient = .25f;
+  unsigned commands = 0, publications = 0, refreshes = 0;
+  MainWindow *window = nullptr;
+  UiCommands c;
+  c.ambient = [&](float v) {
+    ++commands;
+    confirmed = std::make_shared<SessionSnapshot>(*confirmed);
+    confirmed->ambient =
+        v; // actual GUI command applies synchronously, publication is delayed
+    auto receipt = confirmed;
+    QTimer::singleShot(80, window, [&, receipt] {
+      window->showSnapshot(receipt);
+      ++publications;
+    });
+    return confirmed->ambient;
+  };
+  MainWindow w(c);
+  window = &w;
+  auto old = std::make_shared<SessionSnapshot>(*confirmed);
+  w.showSnapshot(old);
+  w.show();
+  QApplication::processEvents();
+  auto spin = w.findChild<QDoubleSpinBox *>("ambient");
+  auto edit = spin->findChild<QLineEdit *>();
+  REQUIRE(edit);
+  spin->setFocus();
+  QApplication::processEvents();
+  appearanceText(edit, "1.");
+  CHECK(commands == 0);
+  QTimer periodic;
+  QObject::connect(&periodic, &QTimer::timeout, &w, [&] {
+    w.showSnapshot(old);
+    ++refreshes;
+  });
+  periodic.start(500);
+  REQUIRE(test::until([&] { return refreshes == 2; }));
+  CHECK(edit->text() == "1.");
+  appearanceKey(edit, Qt::Key_5, "5");
+  CHECK(edit->text() == "1.5");
+  CHECK(commands == 0);
+  periodic.stop();
+  appearanceKey(edit, Qt::Key_Return, "\r");
+  CHECK(commands == 1);
+  CHECK(confirmed->ambient == doctest::Approx(1.5));
+  w.showSnapshot(old); // stale refresh before queued accepted publication
+                       // cannot roll back the acknowledgement
+  CHECK(spin->value() == doctest::Approx(1.5));
+  REQUIRE(test::until([&] { return publications == 1; }));
+  CHECK(spin->value() == doctest::Approx(1.5));
+  CHECK(commands == 1);
+}
+TEST_CASE("ui/p10-fix-arrows-wheel-rejection-and-normal-acknowledgement") {
+  auto state = std::make_shared<SessionSnapshot>();
+  state->roughness = .5f;
+  state->normalMapping = true;
+  bool blocked = false;
+  unsigned commands = 0, publications = 0;
+  MainWindow *window = nullptr;
+  auto publish = [&] {
+    auto receipt = std::make_shared<SessionSnapshot>(*state);
+    QTimer::singleShot(60, window, [&, receipt] {
+      window->showSnapshot(receipt);
+      ++publications;
+    });
+  };
+  UiCommands c;
+  c.roughness = [&](float v) {
+    ++commands;
+    if (!blocked)
+      state->roughness = v;
+    publish();
+    return state->roughness;
+  };
+  c.normalMapping = [&](bool v) {
+    ++commands;
+    if (!blocked)
+      state->normalMapping = v;
+    publish();
+    return state->normalMapping;
+  };
+  MainWindow w(c);
+  window = &w;
+  w.showSnapshot(std::make_shared<SessionSnapshot>(*state));
+  w.show();
+  QApplication::processEvents();
+  auto spin = w.findChild<QDoubleSpinBox *>("roughness");
+  auto edit = spin->findChild<QLineEdit *>();
+  auto normal = w.findChild<QCheckBox *>("normal");
+  spin->setFocus();
+  QApplication::processEvents();
+  appearanceKey(spin, Qt::Key_Up);
+  appearanceKey(spin, Qt::Key_Up);
+  CHECK(state->roughness ==
+        doctest::Approx(.6)); // no stale .50 -> .55 replay on second key
+  QWheelEvent wheel(QPointF(5, 5), QPointF(5, 5), QPoint(), QPoint(0, 120),
+                    Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+  QApplication::sendEvent(spin, &wheel);
+  CHECK(state->roughness == doctest::Approx(.65));
+  normal->click();
+  CHECK_FALSE(normal->isChecked());
+  CHECK_FALSE(state->normalMapping);
+  auto stale = std::make_shared<SessionSnapshot>();
+  stale->roughness = .5f;
+  stale->normalMapping = true;
+  w.showSnapshot(stale);
+  CHECK_FALSE(normal->isChecked());
+  CHECK(spin->value() == doctest::Approx(.65));
+  CHECK(commands == 4);
+  REQUIRE(test::until([&] { return publications == 4; }));
+  CHECK(spin->value() == doctest::Approx(.65));
+  CHECK(commands == 4);
+  blocked = true;
+  spin->setFocus();
+  appearanceText(edit, "0.9");
+  appearanceKey(edit, Qt::Key_Return, "\r");
+  CHECK(spin->value() == doctest::Approx(.65));
+  CHECK(edit->text().toDouble() == doctest::Approx(.65));
+  normal->click();
+  CHECK_FALSE(normal->isChecked());
+  REQUIRE(test::until([&] { return publications == 6; }));
+  CHECK(spin->value() == doctest::Approx(.65));
+  CHECK(commands == 6);
+  // Focus-out commits a valid keyboard draft as well (even when the command is
+  // blocked).
+  spin->setFocus();
+  appearanceText(edit, "0.8");
+  normal->setFocus();
+  QApplication::processEvents();
+  REQUIRE(test::until([&] { return publications == 7; }));
+  CHECK(spin->value() == doctest::Approx(.65));
+  CHECK(commands == 7);
 }

@@ -7,7 +7,6 @@ The root LICENSE.txt below is SOFTWARE permission, not a blanket model license.
 Floor: no separate model grant found; LICENSE.txt is provenance, not model permission.
 Runtime --asset-root may select a trusted copy; this manifest does not authenticate
 arbitrary replacement bytes or grant any permission on replacement resources.
-P9 rendered head/diablo diagnostics do not certify every model or normal handedness.
 
 Original source notices reproduced verbatim below (including source metadata).
 

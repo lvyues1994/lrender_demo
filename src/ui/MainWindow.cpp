@@ -5,11 +5,42 @@
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
 #include <limits>
 namespace demo {
+namespace {
+// Text is a draft until Qt commits (Return/focus-out); arrows/wheel commit
+// steps. A command's synchronous GUI acknowledgement is authoritative even if
+// its snapshot publication is delayed. Stale refreshes cannot roll it back.
+class AppearanceSpinBox : public QDoubleSpinBox {
+public:
+  AppearanceSpinBox() { setKeyboardTracking(false); }
+  void acknowledge(double value) {
+    awaiting_ = value;
+    QSignalBlocker block(this);
+    setValue(value);
+    lineEdit()->setModified(false);
+  }
+  void observe(double value) {
+    if (awaiting_) {
+      if (float(*awaiting_) != float(value))
+        return;
+      awaiting_.reset();
+    }
+    if (lineEdit()->hasFocus() && lineEdit()->isModified())
+      return;
+    QSignalBlocker block(this);
+    setValue(value);
+  }
+
+private:
+  std::optional<double> awaiting_;
+};
+} // namespace
+
 MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
   auto central = new QWidget;
   auto layout = new QVBoxLayout(central);
@@ -33,12 +64,12 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
   controls->addWidget(exposure_);
   controls->addWidget(taa_);
   controls->addWidget(reset);
-  auto ambient = new QDoubleSpinBox;
+  auto ambient = new AppearanceSpinBox;
   ambient->setObjectName("ambient");
   ambient->setRange(0, std::numeric_limits<float>::max());
   ambient->setValue(.25);
   ambient->setSingleStep(.05);
-  auto roughness = new QDoubleSpinBox;
+  auto roughness = new AppearanceSpinBox;
   roughness->setObjectName("roughness");
   roughness->setRange(0, 1);
   roughness->setValue(.5);
@@ -51,21 +82,28 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
   normals->setObjectName("normal");
   normals->setChecked(true);
   controls->addWidget(normals);
-  connect(normals, &QCheckBox::toggled, this, [this](bool enabled) {
-    if (commands_.normalMapping)
-      commands_.normalMapping(enabled);
-    restoreAppearance();
+  connect(normals, &QCheckBox::toggled, this, [this, normals](bool enabled) {
+    auto applied = commands_.normalMapping ? commands_.normalMapping(enabled)
+                   : lastSnapshot_         ? lastSnapshot_->normalMapping
+                                           : true;
+    normalAcknowledgement_ = applied;
+    QSignalBlocker block(normals);
+    normals->setChecked(applied);
   });
-  connect(ambient, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v) {
-    if (commands_.ambient)
-      commands_.ambient(float(v));
-    restoreAppearance();
-  });
-  connect(roughness, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v) {
-    if (commands_.roughness)
-      commands_.roughness(float(v));
-    restoreAppearance();
-  });
+  connect(ambient, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+          [this, ambient](double v) {
+            auto applied = commands_.ambient ? commands_.ambient(float(v))
+                           : lastSnapshot_   ? lastSnapshot_->ambient
+                                             : .25f;
+            ambient->acknowledge(applied);
+          });
+  connect(roughness, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+          [this, roughness](double v) {
+            auto applied = commands_.roughness ? commands_.roughness(float(v))
+                           : lastSnapshot_     ? lastSnapshot_->roughness
+                                               : .5f;
+            roughness->acknowledge(applied);
+          });
   layout->addLayout(controls);
   viewport_ = new ViewportHost(commands_);
   layout->addWidget(viewport_, 1);
@@ -80,31 +118,41 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
   setCentralWidget(central);
   resize(720, 560);
   setWindowTitle("lrender · Qt Vulkan viewer");
-  connect(model_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-    if (commands_.model)
-      commands_.model({model_->currentText().toStdString()});
-  });
+  connect(model_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+          [this](int) {
+            if (commands_.model)
+              commands_.model({model_->currentText().toStdString()});
+          });
   connect(pipeline_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
           [this](int) { optionsChanged(); });
   connect(exposure_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
           [this](double) { optionsChanged(); });
   connect(taa_, &QCheckBox::toggled, this, [this](bool) { optionsChanged(); });
-  connect(reset, &QPushButton::clicked, this, [this] { viewport_->resetCamera(bounds_); });
+  connect(reset, &QPushButton::clicked, this,
+          [this] { viewport_->resetCamera(bounds_); });
 }
 void MainWindow::optionsChanged() {
   if (commands_.options)
-    commands_.options({pipeline_->currentIndex() == 1 ? PipelineKind::Pathtrace : PipelineKind::Visibility,
+    commands_.options({pipeline_->currentIndex() == 1
+                           ? PipelineKind::Pathtrace
+                           : PipelineKind::Visibility,
                        float(exposure_->value()), taa_->isChecked()});
 }
 void MainWindow::restoreAppearance() {
   if (!lastSnapshot_)
     return;
-  auto a = findChild<QDoubleSpinBox *>("ambient"), r = findChild<QDoubleSpinBox *>("roughness");
+  auto a = findChild<QDoubleSpinBox *>("ambient"),
+       r = findChild<QDoubleSpinBox *>("roughness");
   auto n = findChild<QCheckBox *>("normal");
-  QSignalBlocker ba(a), br(r), bn(n);
-  a->setValue(lastSnapshot_->ambient);
-  r->setValue(lastSnapshot_->roughness);
-  n->setChecked(lastSnapshot_->normalMapping);
+  static_cast<AppearanceSpinBox *>(a)->observe(lastSnapshot_->ambient);
+  static_cast<AppearanceSpinBox *>(r)->observe(lastSnapshot_->roughness);
+  if (normalAcknowledgement_ &&
+      *normalAcknowledgement_ == lastSnapshot_->normalMapping)
+    normalAcknowledgement_.reset();
+  if (!normalAcknowledgement_) {
+    QSignalBlocker block(n);
+    n->setChecked(lastSnapshot_->normalMapping);
+  }
 }
 void MainWindow::showSnapshot(SessionSnapshotPtr s) {
   lastSnapshot_ = s;
@@ -118,13 +166,13 @@ void MainWindow::showSnapshot(SessionSnapshotPtr s) {
   viewport_->showCamera(s->camera);
   if (s->assetBounds)
     bounds_ = *s->assetBounds;
-  status_->setText(
-      QString::fromStdString(s->backend + " / " + s->device + " | " +
-                             (s->path == PresentationPath::VulkanShared ? "Shared" : "Readback") +
-                             " | requested=" + (s->model ? s->model->value : "none") +
-                             " installed=" + (s->installedModel ? s->installedModel->value : "none") +
-                             (s->error ? " | " + s->error->message + ": " + s->error->cause : "") +
-                             (s->warnings.empty() ? "" : " | " + s->warnings.back())));
+  status_->setText(QString::fromStdString(
+      s->backend + " / " + s->device + " | " +
+      (s->path == PresentationPath::VulkanShared ? "Shared" : "Readback") +
+      " | requested=" + (s->model ? s->model->value : "none") +
+      " installed=" + (s->installedModel ? s->installedModel->value : "none") +
+      (s->error ? " | " + s->error->message + ": " + s->error->cause : "") +
+      (s->warnings.empty() ? "" : " | " + s->warnings.back())));
   QString notices;
   for (auto const &n : s->assetNotices)
     notices += QString::fromStdString(n) + "\n";
@@ -134,11 +182,15 @@ void MainWindow::showSnapshot(SessionSnapshotPtr s) {
   };
   auto p = s->performance;
   auto gpu = p.gpuPassTotalMs
-                 ? "GPU pass sum=" + number(p.gpuPassTotalMs) + " ms (profiling serializes dispatches)"
-                 : QString("GPU unavailable (timers disabled/unsupported or partial timestamps)");
+                 ? "GPU pass sum=" + number(p.gpuPassTotalMs) +
+                       " ms (profiling serializes dispatches)"
+                 : QString("GPU unavailable (timers disabled/unsupported or "
+                           "partial timestamps)");
   performance_->setText(
-      QString("completion FPS=%1 (window %2s), completed=%3, display events=%4, dropped=%5, inflight=%6, "
-              "samples=%7\nCPU GUI prepare=%8 ms | submit-to-device finish wall=%9 ms | %10 | presenter "
+      QString("completion FPS=%1 (window %2s), completed=%3, display "
+              "events=%4, dropped=%5, inflight=%6, "
+              "samples=%7\nCPU GUI prepare=%8 ms | submit-to-renderer finish "
+              "wall=%9 ms | %10 | presenter "
               "handover=%11 ms (not photon latency)")
           .arg(p.completionFps, 0, 'f', 1)
           .arg(p.windowSeconds, 0, 'f', 2)
@@ -151,9 +203,12 @@ void MainWindow::showSnapshot(SessionSnapshotPtr s) {
           .arg(number(p.frameWallMs))
           .arg(gpu)
           .arg(number(p.presenterLatencyMs)));
-  performance_->setToolTip("Completion FPS counts renderer receipts, not scanout. Readback display events "
-                           "count owned-image handoffs, not widget paints or monitor refresh. GPU pass sums "
-                           "may overlap neither wall time nor end-to-end latency.");
+  performance_->setToolTip(
+      "Completion FPS counts renderer receipts, not scanout. Readback display "
+      "events "
+      "count owned-image handoffs, not widget paints or monitor refresh. GPU "
+      "pass sums "
+      "may overlap neither wall time nor end-to-end latency.");
   if (s->life == LifeState::Stopped)
     stopped_ = true;
 }

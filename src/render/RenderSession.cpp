@@ -117,6 +117,9 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     value->performance.sharedShown = display.sharedShown;
     value->performance.dropped = display.dropped;
     value->performance.presenterLatencyMs = display.presenterLatencyMs;
+    // GUI observation samples adapter counters/latency into diagnostics. This
+    // does not submit/retire GPU work, mutate World, or schedule a frame; repeated
+    // snapshot observations are permitted (including command acknowledgements).
     diagnostics.recordPresentation(value->performance.displayed, display.dropped, display.presenterLatencyMs);
     auto measured = diagnostics.snapshot();
     value->performance.completionFps = measured.completionFps;

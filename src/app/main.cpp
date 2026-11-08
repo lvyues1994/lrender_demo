@@ -79,14 +79,17 @@ struct Viewer : QObject {
     commands.normalMapping = [this](bool enabled) {
       if (session)
         session->setNormalMapping(enabled);
+      return session ? session->snapshot()->normalMapping : true;
     };
     commands.ambient = [this](float v) {
       if (session)
         session->setAmbient(v);
+      return session ? session->snapshot()->ambient : .25f;
     };
     commands.roughness = [this](float v) {
       if (session)
         session->setRoughness(v);
+      return session ? session->snapshot()->roughness : .5f;
     };
     commands.camera = [this](auto c) {
       if (session)

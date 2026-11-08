@@ -959,3 +959,90 @@ TEST_CASE("session/p10-taa-camera-real-target-preserved-cut-only-next-submit") {
   h.complete(3);
   stop(s, h);
 }
+
+#include "ui/MainWindow.h"
+#include <QApplication>
+#include <QDoubleSpinBox>
+#include <QKeyEvent>
+#include <QLineEdit>
+TEST_CASE(
+    "session/p10-fix-real-cpu-gui-command-ack-survives-delayed-publication") {
+  Harness h;
+  auto r = resources();
+  MainWindow *window = nullptr;
+  unsigned delivered = 0, commandCount = 0;
+  SessionEvents events = h.events();
+  events.onSnapshot = [&](SessionSnapshotPtr snap) {
+    if (window)
+      QTimer::singleShot(80, window, [&, snap] {
+        window->showSnapshot(snap);
+        ++delivered;
+      });
+  };
+  RenderSession s(
+      std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+      std::make_unique<ReadbackAdapter>(h.imageEvents()), {}, events);
+  UiCommands c;
+  c.ambient = [&](float v) {
+    ++commandCount;
+    s.setAmbient(v);
+    return s.snapshot()->ambient;
+  };
+  MainWindow w(c);
+  window = &w;
+  start(s, false);
+  REQUIRE(test::until([&] { return h.images > 0 && delivered > 0; }));
+  auto old = s.snapshot();
+  w.showSnapshot(old);
+  w.show();
+  QApplication::processEvents();
+  auto spin = w.findChild<QDoubleSpinBox *>("ambient");
+  auto edit = spin->findChild<QLineEdit *>();
+  REQUIRE(edit);
+  spin->setFocus();
+  QApplication::processEvents();
+  auto key = [&](int k, QString text = {},
+                 Qt::KeyboardModifiers mods = Qt::NoModifier) {
+    QKeyEvent down(QEvent::KeyPress, k, mods, text),
+        up(QEvent::KeyRelease, k, mods, text);
+    QApplication::sendEvent(edit, &down);
+    QApplication::sendEvent(edit, &up);
+  };
+  key(Qt::Key_A, {}, Qt::ControlModifier);
+  key(Qt::Key_1, "1");
+  key(Qt::Key_Period, ".");
+  unsigned ticks = 0;
+  QTimer refresh;
+  QObject::connect(&refresh, &QTimer::timeout, &w, [&] {
+    w.showSnapshot(old);
+    ++ticks;
+  });
+  refresh.start(5);
+  REQUIRE(test::until([&] { return ticks >= 3; }));
+  CHECK(edit->text() == "1.");
+  CHECK(commandCount == 0);
+  refresh.stop();
+  key(Qt::Key_5, "5");
+  auto before = h.images, published = delivered;
+  key(Qt::Key_Return, "\r");
+  CHECK(s.snapshot()->ambient == doctest::Approx(1.5));
+  w.showSnapshot(old);
+  CHECK(spin->value() == doctest::Approx(1.5));
+  REQUIRE(
+      test::until([&] { return delivered > published && h.images > before; }));
+  CHECK(spin->value() == doctest::Approx(1.5));
+  CHECK(commandCount == 1);
+  REQUIRE(h.lastImage);
+  CHECK(h.lastImage->image->pixels.size() == 64);
+  CHECK(h.errors.empty());
+  stop(s, h);
+  w.showSnapshot(s.snapshot());
+  key(Qt::Key_A, {}, Qt::ControlModifier);
+  key(Qt::Key_2, "2");
+  key(Qt::Key_Period, ".");
+  key(Qt::Key_5, "5");
+  key(Qt::Key_Return, "\r");
+  CHECK(commandCount == 2);
+  CHECK(s.snapshot()->ambient == doctest::Approx(1.5));
+  CHECK(spin->value() == doctest::Approx(1.5));
+}

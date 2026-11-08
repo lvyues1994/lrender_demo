@@ -26,6 +26,7 @@ private:
   lr::core::Aabb bounds_{{-1, -1, -1}, {1, 1, 1}};
   void optionsChanged();
   SessionSnapshotPtr lastSnapshot_;
+  std::optional<bool> normalAcknowledgement_;
   void restoreAppearance();
 };
 } // namespace demo

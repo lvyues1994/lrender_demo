@@ -21,6 +21,10 @@ private:
   Now now_;
   Clock::time_point started_;
   PerformanceSnapshot value_;
+  // A synchronous submit throw can have unknown acceptance. Keep correlation
+  // until a receipt or accumulator destruction; do not invent cancellation or
+  // a successful completion. Session fault-latches further submissions (<=2).
+  // The user-facing inflight count remains the authoritative FramePump count.
   std::map<std::uint64_t, FrameStamp> pending_;
   std::deque<Clock::time_point> completed_;
 };

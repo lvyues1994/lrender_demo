@@ -56,7 +56,11 @@ Move/copy of the executable plus explicit resource root is supported on the test
 host; this is NOT a self-contained SDK/driver bundle or cross-machine packaging.
 Drag to orbit, wheel to zoom, Reset view frames the installed bounds. Model,
 pipeline, exposure, TAA, ambient, roughness and normal map controls emit values;
-snapshots confirm actual state without signal feedback. Requested and installed
+appearance commands synchronously acknowledge the actual GUI-applied value, even
+when snapshot publication is delayed. Ambient/roughness typing commits on Return
+or focus-out (arrows/wheel commit steps); periodic statistics refreshes preserve
+uncommitted text and do not roll back acknowledged values. Snapshots synchronize
+without signal feedback. Requested and installed
 models differ while loading/after failure; old installed World remains on load
 failure. Blocked appearance changes do not remain displayed as accepted values.
 
@@ -84,7 +88,7 @@ swapchain, or use a chrome-only image as viewport evidence.
 
 Completion FPS is renderer receipt count in the last<=1s window, not monitor
 refresh/scanout. CPU GUI prepare is measured command/frame assembly wall time;
-submit-to-device finish wall is upstream FrameResult.wallTime (includes host,
+submit-to-renderer finish wall is upstream FrameResult.wallTime (includes host,
 queues/device/finish), NOT GPU execution time. Display events are presenter shown
 on Shared or owned-image handoffs on Readback, not photons/widget paints. Dropped,
 inflight and accumulated samples are distinct. Presenter handover latency is not
