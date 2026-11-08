@@ -120,7 +120,7 @@ struct VulkanSharedAdapter::Impl : QObject, std::enable_shared_from_this<Impl> {
       result.displayed += p.shown;
       result.sharedShown += p.sharedShown;
       result.dropped += p.dropped;
-      result.presenterLatencyMs = p.meanLatencyMs;
+      if(p.shown)result.presenterLatencyMs = p.meanLatencyMs;
     }
     return result;
   }

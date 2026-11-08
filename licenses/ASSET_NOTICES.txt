@@ -1,0 +1,69 @@
+ASSET SOURCES / ORIGINAL NOTICES
+Source: https://github.com/ssloy/tinyrenderer
+Locked source SHA: 97eb7a480e762285899a93c5d21e70a79e60782e
+Original assets remain read-only. Local educational/example use is not a blanket
+commercial or redistribution grant. Verify applicable permission before publishing.
+The root LICENSE.txt below is SOFTWARE permission, not a blanket model license.
+Floor: no separate model grant found; LICENSE.txt is provenance, not model permission.
+Runtime --asset-root may select a trusted copy; this manifest does not authenticate
+arbitrary replacement bytes or grant any permission on replacement resources.
+P9 rendered head/diablo diagnostics do not certify every model or normal handedness.
+
+Original source notices reproduced verbatim below (including source metadata).
+
+===== Original LICENSE.txt =====
+Tiny Renderer, https://github.com/ssloy/tinyrenderer
+Copyright Dmitry V. Sokolov
+
+This software is provided 'as-is', without any express or implied warranty.
+In no event will the authors be held liable for any damages arising from the use of this software.
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it freely,
+subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not claim that you wrote the original software. If you use this software in a product, an acknowledgment in the product documentation would be appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+
+
+===== Original obj/african_head/readme.txt =====
+Male african head example (c) 2007. Vidar Rapp
+http://vidarrapp.se/
+
+=====================================================
+
+From: Vidar Rapp <vidar.rapp@gmail.com>
+To: Dmitry Sokolov <dmitry.sokolov@loria.fr>
+Subject: Re: african head model
+Date: Sat, 10 Dec 2011 22:59:48 +0100
+
+Hey Dmitry,
+
+Please feel free to use the model (specified below) as an example in
+your renderer.
+
+I hope you get a lot of use out of it.
+
+All the best,
+Vidar
+
+
+===== Original obj/diablo3_pose/readme.txt =====
+Credits to Samuel (arshlevon) Sharit
+---
+
+Date: Tue, 27 Jan 2015 19:24:30 -0800
+From: Samuel Sharit <arshlevon@gmail.com>
+To: Dmitry Sokolov <dmitry.sokolov@loria.fr>
+Subject: Re: diablo posing
+
+Go for it!
+
+[cut]
+
+
+===== Original obj/boggie/readme.txt =====
+model by Bojana Nedeljković
+http://fogmann.com/
+
+Permission to use in this educational project granted 6 february 2015

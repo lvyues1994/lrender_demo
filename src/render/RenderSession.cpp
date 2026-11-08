@@ -1,5 +1,6 @@
 #include "RenderSession.h"
 #include "AssetInstall.h"
+#include "Diagnostics.h"
 #include "FramePump.h"
 #include "SessionFrameSubmit.h"
 #include "SessionState.h"
@@ -58,6 +59,9 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   };
   std::map<std::uint64_t, Record> outstanding;
   PerformanceSnapshot performance;
+  mutable Diagnostics diagnostics;
+  float ambient = .25f, roughness = .5f;
+  bool normalMapping = true;
   bool textureFollowupPending = false;
   std::optional<std::chrono::steady_clock::time_point> receiptWaitStarted;
   double receiptWaitMs = 0;
@@ -88,7 +92,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   std::unique_ptr<lqtexec::ObjectScope> cleanupScope, uiScope;
   Impl(Resources r, std::unique_ptr<PresentationAdapter> a, SubmitFrame submit, SessionEvents ev)
       : resources(std::move(r)), adapter(std::move(a)), overrideSubmit(std::move(submit)),
-        events(std::move(ev)) {
+        events(std::move(ev)), diagnostics(resources.renderer && bool(resources.renderer->deviceInfo().gpu)) {
     if (!QCoreApplication::instance() || QThread::currentThread() != QCoreApplication::instance()->thread())
       throw std::logic_error("RenderSession requires GUI owner");
     if (!resources.runtime || !resources.renderer || !resources.world || !adapter)
@@ -105,18 +109,33 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     owner();
     auto value = std::make_shared<SessionSnapshot>(*state.snapshot());
     value->performance = performance;
+    value->ambient = ambient;
+    value->roughness = roughness;
+    value->normalMapping = normalMapping;
     auto display = adapter->presentationStats();
     value->performance.displayed += display.displayed;
     value->performance.sharedShown = display.sharedShown;
     value->performance.dropped = display.dropped;
     value->performance.presenterLatencyMs = display.presenterLatencyMs;
+    diagnostics.recordPresentation(value->performance.displayed, display.dropped, display.presenterLatencyMs);
+    auto measured = diagnostics.snapshot();
+    value->performance.completionFps = measured.completionFps;
+    value->performance.windowSeconds = measured.windowSeconds;
+    value->performance.hostPrepareMs = measured.hostPrepareMs;
+    value->performance.frameWallMs = measured.frameWallMs;
+    value->performance.gpuPassTotalMs = measured.gpuPassTotalMs;
+    value->performance.presenterLatencyMs = measured.presenterLatencyMs;
     value->warnings.insert(value->warnings.end(), presentationWarnings.begin(), presentationWarnings.end());
     value->installedModel = installer && installer->current()
                                 ? std::optional<ModelId>{installer->current()->model}
                                 : std::nullopt;
     value->assetInstalling = installer && installer->active();
-    if (installer && installer->current())
+    if (installer && installer->current()) {
       value->assetBounds = installer->current()->bounds;
+      value->assetNotices = installer->current()->notices;
+      value->warnings.insert(value->warnings.end(), installer->current()->warnings.begin(),
+                             installer->current()->warnings.end());
+    }
     value->installationParts = installer ? installer->completedParts() : 0;
     value->assetLoadsInFlight = loads.size();
     value->performance.inFlight = pump.inFlight();
@@ -492,6 +511,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     if (!stamp)
       return;
     outstanding.emplace(stamp->sequence, Record{*stamp, *target});
+    auto prepareStarted = std::chrono::steady_clock::now();
     lr::render::FrameDesc frame;
     try {
       if (!pending) {
@@ -539,6 +559,9 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
         self->completed(std::move(completion));
       });
     };
+    diagnostics.recordSubmission(
+        *stamp,
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - prepareStarted).count());
     try {
       if (overrideSubmit)
         overrideSubmit(std::move(frame), *stamp, std::move(done));
@@ -564,6 +587,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     auto found = outstanding.find(completion.stamp.sequence);
     if (found == outstanding.end())
       return;
+    diagnostics.recordCompletion(completion);
     auto record = found->second;
     outstanding.erase(found);
     pump.complete(record.stamp);
@@ -794,6 +818,7 @@ void RenderSession::setNormalMapping(bool enabled) {
     return;
   try {
     s.installer->setNormalMapping(enabled);
+    s.normalMapping = enabled;
     s.sceneParametersChanged();
   } catch (std::exception const &e) {
     s.fault(issue(ErrorStage::Submit, "normal material mutation failed closed", e.what()));
@@ -808,6 +833,7 @@ void RenderSession::setAmbient(float intensity) {
     throw std::invalid_argument("ambient radiance requires finite >=0");
   try {
     s.resources.world->setEnvironment({lr::core::vec3{intensity}});
+    s.ambient = intensity;
     s.sceneParametersChanged();
   } catch (std::exception const &e) {
     s.fault(issue(ErrorStage::Submit, "lighting mutation failed closed", e.what()));
@@ -822,6 +848,7 @@ void RenderSession::setRoughness(float roughness) {
     throw std::invalid_argument("roughness requires finite [0,1]");
   try {
     s.installer->setRoughness(roughness);
+    s.roughness = roughness;
     s.sceneParametersChanged();
   } catch (std::exception const &e) {
     s.fault(issue(ErrorStage::Submit, "material mutation failed closed", e.what()));
@@ -833,7 +860,10 @@ void RenderSession::setCamera(CameraState camera) {
   if (s.blocked())
     return;
   s.state.setCamera(camera);
-  s.historyChange();
+  // Actual upstream PT continuesAccumulation compares the complete CameraDesc.
+  // TAA consumes ViewDesc.cameraCut below. Both reset without retiring the
+  // target/presenter/host for camera-only changes; pipeline/TAA transitions and
+  // scene/extent/native loss still keep their existing drain/rebuild barrier.
   s.pump.markDirty();
   s.queueTick();
   s.publish();

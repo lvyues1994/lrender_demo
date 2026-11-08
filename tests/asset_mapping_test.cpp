@@ -137,3 +137,44 @@ TEST_CASE("asset_mapping/mid-parse-and-mid-image-cancellation-is-not-failure") {
     CHECK(std::get<RenderError>(result).recoverable);
   }
 }
+
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+TEST_CASE("asset_mapping/p10-readable-catalog-matches-fixed-runtime-manifest") {
+  QFile file(QString::fromUtf8(DEMO_METADATA_ROOT) + "/assets/catalog.json");
+  REQUIRE(file.open(QIODevice::ReadOnly));
+  auto doc = QJsonDocument::fromJson(file.readAll());
+  REQUIRE(doc.isObject());
+  auto object = doc.object();
+  CHECK(object["sourceSha"].toString() == "97eb7a480e762285899a93c5d21e70a79e60782e");
+  auto models = object["models"].toArray();
+  auto actual = demo::AssetCatalog{}.list();
+  REQUIRE(models.size() == int(actual.size()));
+  for (int i = 0; i < models.size(); ++i) {
+    auto m = models[i].toObject();
+    CHECK(m["id"].toString().toStdString() == actual[i].id.value);
+    CHECK(m["noticePath"].toString().toStdString() == actual[i].licensePath);
+    auto parts = m["parts"].toArray();
+    REQUIRE(parts.size() == int(actual[i].parts.size()));
+    for (int j = 0; j < parts.size(); ++j) {
+      auto p = parts[j].toObject();
+      auto a = actual[i].parts[j];
+      CHECK(p["obj"].toString().toStdString() == a.objPath);
+      CHECK(p["diffuse"].toString().toStdString() == a.diffusePath);
+      CHECK(p["normal"].toString().toStdString() == a.normalPath);
+      CHECK(p["specularUnbound"].toString().toStdString() == a.specPath);
+      CHECK(p["emissive"].toString().toStdString() == a.emissivePath);
+    }
+  }
+  QFile notices(QString::fromUtf8(DEMO_METADATA_ROOT) + "/licenses/ASSET_NOTICES.txt");
+  REQUIRE(notices.open(QIODevice::ReadOnly));
+  auto text = notices.readAll();
+  CHECK(text.contains("Vidar Rapp"));
+  CHECK(text.contains("Samuel"));
+  CHECK(text.contains("Bojana"));
+  CHECK(text.contains("educational"));
+  CHECK(text.contains("not a blanket"));
+  CHECK(text.contains("no separate model grant"));
+}

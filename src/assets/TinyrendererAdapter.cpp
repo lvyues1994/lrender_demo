@@ -1,4 +1,5 @@
 #include "TinyrendererAdapter.h"
+#include "AssetRoot.h"
 #include "ObjLoader.h"
 #include "TgaDecoder.h"
 #include <algorithm>
@@ -11,27 +12,10 @@ void checkpoint(std::function<bool()> const &stop) {
   if (stop && stop())
     throw std::runtime_error("cancelled");
 }
-std::filesystem::path checkedPath(std::string const &relative) {
-  namespace fs = std::filesystem;
-  fs::path p(relative);
-  if (p.empty() || p.is_absolute())
-    throw std::runtime_error("asset path must be relative");
-  for (auto const &x : p)
-    if (x == "..")
-      throw std::runtime_error("asset path escape rejected");
-  auto root = fs::canonical(DEMO_TINYRENDERER_ROOT), resolved = fs::canonical(root / p);
-  auto a = root.begin(), b = resolved.begin();
-  for (; a != root.end(); ++a, ++b)
-    if (b == resolved.end() || *a != *b)
-      throw std::runtime_error("asset symlink escape rejected");
-  if (!fs::is_regular_file(resolved))
-    throw std::runtime_error("asset is not a regular file");
-  return resolved;
-}
-std::vector<std::uint8_t> read(std::string const &name, std::size_t limit,
+std::vector<std::uint8_t> read(std::filesystem::path const& root, std::string const &name, std::size_t limit,
                                std::function<bool()> const &stop) {
   checkpoint(stop);
-  auto path = checkedPath(name);
+  auto path = checkedAssetPath(root,name);
   auto size = std::filesystem::file_size(path);
   if (size > limit)
     throw std::runtime_error("asset input byte limit");
@@ -54,9 +38,11 @@ bool same(AssetPartEntry const &a, AssetPartEntry const &b) {
          a.emissivePath == b.emissivePath && a.specPath == b.specPath;
 }
 } // namespace
-Result<CpuAssetPtr> decodeAsset(AssetEntry const &entry, std::function<bool()> stop) {
+Result<CpuAssetPtr> decodeAsset(AssetEntry const& entry,std::function<bool()> stop){return decodeAssetAtRoot(entry,defaultAssetRoot(),std::move(stop));}
+Result<CpuAssetPtr> decodeAssetAtRoot(AssetEntry const &entry,std::filesystem::path const& input, std::function<bool()> stop) {
   try {
     checkpoint(stop);
+    auto root=validateAssetRoot(input);
     auto known = AssetCatalog{}.describe(entry.id);
     if (auto e = std::get_if<RenderError>(&known))
       return *e;
@@ -65,8 +51,8 @@ Result<CpuAssetPtr> decodeAsset(AssetEntry const &entry, std::function<bool()> s
         entry.parts.size() != canonical.parts.size() ||
         !std::equal(entry.parts.begin(), entry.parts.end(), canonical.parts.begin(), same))
       throw std::runtime_error("modified/untrusted catalog manifest rejected");
-    (void)checkedPath(entry.licensePath);
-    (void)checkedPath("LICENSE.txt");
+    (void)checkedAssetPath(root,entry.licensePath);
+    (void)checkedAssetPath(root,"LICENSE.txt");
     auto asset = std::make_shared<CpuAsset>();
     asset->model = entry.id;
     std::size_t used = 0;
@@ -100,7 +86,7 @@ Result<CpuAssetPtr> decodeAsset(AssetEntry const &entry, std::function<bool()> s
       if (path.empty())
         return {};
       checkpoint(stop);
-      auto bytes = read(path, 128u * 1024 * 1024, stop);
+      auto bytes = read(root,path, 128u * 1024 * 1024, stop);
       auto encoding = role == TextureRole::Diffuse || role == TextureRole::Emissive
                           ? lr::core::ColorEncoding::Srgb
                           : lr::core::ColorEncoding::Linear;
@@ -116,7 +102,7 @@ Result<CpuAssetPtr> decodeAsset(AssetEntry const &entry, std::function<bool()> s
     };
     for (auto const &p : entry.parts) {
       checkpoint(stop);
-      auto bytes = read(p.objPath, 32u * 1024 * 1024, stop);
+      auto bytes = read(root,p.objPath, 32u * 1024 * 1024, stop);
       std::string_view text(reinterpret_cast<char const *>(bytes.data()), bytes.size());
       auto parsed = parseObj(text, stop);
       if (auto e = std::get_if<RenderError>(&parsed))

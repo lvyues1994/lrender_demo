@@ -1,1 +1,158 @@
-# lrender_demo
+# lrender Qt Vulkan demo (P10 milestone, P11 pending)
+
+Qt5.15 Widgets viewer using real lrender/lexec/lqtexec. Vulkan is default;
+CPU is used only with explicit `--backend cpu`. No general OBJ/MTL editor/importer.
+
+## Offline build / prerequisites
+
+Use the existing local source tree with all14 locked checkouts below. CMake never
+fetches/clones missing sources: it fails with an explicit lock/path error. Qt5.15
+Core/Gui/Widgets development files, C++17 exceptions, CMake>=3.25, Ninja, Clang
+for the tc transpiler, Vulkan loader/headers/driver and XCB headers/library are
+system prerequisites; no install command is run automatically. Tested Qt5.15.13,
+GCC13.3 and NVIDIA RTX5070Ti on Linux XCB. No Qt private ABI or Qt-owned VkSurface.
+
+```sh
+cd /absolute/path/to/lrender_demo
+cmake -S . -B build/plan-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/plan-debug --target lrender_demo demo_tests demo_qt_vulkan_probe --parallel 2
+cmake -P cmake/VerifyDependencies.cmake
+QT_QPA_PLATFORM=offscreen build/plan-debug/demo_tests --no-skip=true
+QT_QPA_PLATFORM=offscreen ctest --test-dir build/plan-debug -L unit --output-on-failure
+```
+
+lr::render WHOLE_ARCHIVE, one shared lexec target, C++17 exceptions, Vulkan and tc
+transpiler are enabled; network/tests/examples/benchmarks of dependencies and
+OpenGL are disabled. A successful build is not proof of shared presentation.
+
+## Run / resource root / moved executable
+
+`--asset-root` points to TinyRenderer data containing LICENSE.txt and obj/, NOT
+the parent assets directory or catalog.json. Default is the absolute data root
+recorded at build time (convenience only). Use explicit root for moved binaries;
+no cwd-relative fallback, downloading, re-cloning, or model-name guessing occurs.
+All catalog paths remain fixed, relative and canonical-root-contained; traversal,
+absolute paths and symlink escapes are rejected. Root structure is validated at
+startup; each selected model is parsed/validated when requested. Trusted copies
+are accepted, not cryptographically authenticated as the original source tree.
+
+```sh
+APP=/absolute/path/to/lrender_demo/build/plan-debug/lrender_demo
+DATA=/absolute/path/to/lrender_demo/assets/sources/tinyrenderer
+cd /tmp
+"$APP" --backend vulkan --presentation auto --model african_head --asset-root "$DATA"
+"$APP" --backend vulkan --presentation shared --asset-root "$DATA"
+"$APP" --backend vulkan --presentation readback --asset-root "$DATA"
+"$APP" --backend cpu --presentation readback --model floor --asset-root "$DATA"
+# Invalid root: explicit error and exit1, never fallback to compiled resources.
+QT_QPA_PLATFORM=offscreen "$APP" --backend cpu --asset-root /does/not/exist
+# Same-machine relocation (installed runtime dependencies/RPATH still required):
+mkdir -p /tmp/lrender-demo-bin
+cp "$APP" /tmp/lrender-demo-bin/lrender_demo
+/tmp/lrender-demo-bin/lrender_demo --backend vulkan --asset-root "$DATA"
+```
+
+Move/copy of the executable plus explicit resource root is supported on the tested
+host; this is NOT a self-contained SDK/driver bundle or cross-machine packaging.
+Drag to orbit, wheel to zoom, Reset view frames the installed bounds. Model,
+pipeline, exposure, TAA, ambient, roughness and normal map controls emit values;
+snapshots confirm actual state without signal feedback. Requested and installed
+models differ while loading/after failure; old installed World remains on load
+failure. Blocked appearance changes do not remain displayed as accepted values.
+
+## Real verification / captures
+
+```sh
+timeout 60 "$APP" --backend vulkan --presentation shared --asset-root "$DATA" --self-test full --screenshot /tmp/lrender-shared
+QT_SCALE_FACTOR=1.25 timeout 60 "$APP" --backend vulkan --presentation shared --asset-root "$DATA" --self-test full --screenshot /tmp/lrender-dpr125
+QT_QPA_PLATFORM=offscreen timeout 60 "$APP" --backend vulkan --presentation auto --asset-root "$DATA" --self-test full
+# Required sharing on offscreen must FAIL(exit1), never77 skip:
+QT_QPA_PLATFORM=offscreen timeout 60 "$APP" --backend vulkan --presentation shared --asset-root "$DATA" --self-test full
+# Real platform probe and optional strict CTest:
+/absolute/path/to/lrender_demo/build/plan-debug/demo_qt_vulkan_probe --require-shared --frames 24
+# Configure with -DDEMO_ENABLE_STRICT_SHARED_TEST=ON then ctest -L strict_shared.
+```
+
+Self-test timers/deadline and Qt injected interactions apply only to --self-test;
+ordinary viewer has no45s automatic close. QWidget::grab excludes the native
+child: *-widgets.png proves chrome/status, *-native-window.png captures the
+application's own native XID, *-presented.png / *-latest-diablo.png are actual GPU
+presenter captures. Do not claim a black native child in QWidget grab is a failed
+swapchain, or use a chrome-only image as viewport evidence.
+
+## What numbers mean
+
+Completion FPS is renderer receipt count in the last<=1s window, not monitor
+refresh/scanout. CPU GUI prepare is measured command/frame assembly wall time;
+submit-to-device finish wall is upstream FrameResult.wallTime (includes host,
+queues/device/finish), NOT GPU execution time. Display events are presenter shown
+on Shared or owned-image handoffs on Readback, not photons/widget paints. Dropped,
+inflight and accumulated samples are distinct. Presenter handover latency is not
+input-to-photon latency. GPU pass sum is only actual complete finite passTimings
+from a GPU-identified device; absent/partial values show unavailable, never CPU
+substitution. GPU timers are default disabled; upstream profiling serializes
+dispatches and changes parallelism. Host/CPU timings cannot enable GPU metrics.
+
+## Assets / permissions / limitations
+
+See [catalog](assets/catalog.json) and [original notices](licenses/ASSET_NOTICES.txt).
+The JSON documents the fixed C++ catalog, parts/roles/approximation and exact source
+SHA; it is not a dynamic arbitrary-path import language. Diffuse/emissive are sRGB,
+normal/spec linear; *_nm_tangent is tangent normal, spec is unbound/not uploaded,
+never metallic. Fixed metallic0/roughness0.5 is explicitly approximate (UI may
+change roughness). RGBA is top-row-first; OBJ UV flips once. Model source readmes
+are preserved; TinyRenderer root software LICENSE is NOT model commercial
+redistribution permission. African head example permission, diablo email fragment,
+boggie educational permission and floor lack of separate model grant are distinct.
+No blanket legal/commercial-use conclusion; do not redistribute without permission.
+
+Known limits: deterministic128MiB bounded catalog texture streaming uses a finite
+empty-delta refresh, but the initial factor-only frame may briefly miss textures.
+Normal on/off influence and upright UV imagery are observed, not an author
+handedness/lighting golden. P9 authoritative runtime log is task-9-shared.log;
+task-9-final-shared.log is an older diagnostic, not final acceptance. Historical
+2.14s cleanup root cause remains unproven. P10 now observes comparable1–2s
+waits specifically in presenter.flush, with GUI responsive. A controlled P9-style
+conservative-camera run also exhibits these waits; they are not unique to camera
+reuse. Public flush waits Ready/Taken retirement and copied fences; exact underlying
+WSI/driver cause and whether it matches historical P4 are NOT established.
+P9 PT/TAA camera changes conservatively rebuilt target/presenter/host in198–293ms;
+plain Visibility did not. P10 camera-only changes reuse target/presenter/host:
+actual upstream PT compares CameraDesc for accumulation, and TAA consumes
+cameraCut on the next accepted submit. Real CPU sample1 plus actual GPU/shared/DPR
+regression are required evidence, not an assumption cameraCut resets PT. Pipeline,
+TAA-enable/disable, scene, extent and native-loss boundaries still drain/rebuild.
+
+P11 is still pending: dedicated loader/pool/root/onStopped exit assertions,
+finish-with-active-loader hang resolution, stalled-cleanup UX without unsafe forced
+GPU destruction, zero-shared injection and device-loss regression. True driver
+hang/device reset/non-XCB sharing remain unverified; a running native GPU call
+cannot be forcibly cancelled. No claim that the entire11-step product is complete.
+
+## Exact local source lock
+
+All SHAs cross-checked against approved design section7. System Qt/Vulkan/Clang are
+not cloned. Source changes or missing checkouts fail configuration/lock validation;
+[lock JSON](cmake/dependencies.lock.json) preserves URL/branch/upstream declarations.
+The upstream pin differs for cgltf/stb/doctest/astcenc and lqtexec's lexec fallback;
+local WHOLE_ARCHIVE/shared-target integration was tested, not silently downgraded.
+Doctest reports2.5.0 in its local header despite upstream declaration v2.5.3; use the
+full SHA, not the printed version, as the reproducibility identity. Regenerating
+locks is a deliberate future review action, not an automatic configure step.
+
+| Local checkout | Full SHA | Unmodified upstream declaration / difference |
+|---|---|---|
+| third_party/cgltf | `85cd62382dfea638278962690cf515023f33ed00` | 360db1a95480fe102ae9c69b27c5d101167ff5ba |
+| third_party/co2 | `a265e5771b0e3ca68d6d473b9bb410fadddf4c23` | a265e5771b0e3ca68d6d473b9bb410fadddf4c23 |
+| third_party/compute_shaders | `03db9f228f07269a4ba721b5145461161d31cbd0` | 03db9f228f07269a4ba721b5145461161d31cbd0 |
+| third_party/doctest | `d44d4f6e66232d716af82f00a063759e9d0e50d6` | v2.5.3 |
+| third_party/lexec | `a2568cc5bf14f69addc7d0e04b1e5ed5c0b2173b` | lrender: a2568cc5bf14f69addc7d0e04b1e5ed5c0b2173b; lqtexec fallback: e032d551d53d87209b83d07fd172890461db643b (not used; shared existing lexec::lexec target) |
+| third_party/lqtexec | `f9c8d69d180f5c53bada3c3f408b9c356879a2e5` | direct demo dependency; latest default-branch HEAD at download, frozen by sha |
+| third_party/lrender | `dcf36670724c65b016db9234309ad49192dda6c8` | direct demo dependency; latest default-branch HEAD at download, frozen by sha |
+| third_party/stackfull | `acb88611e1de8fbe7ed6e195ba76ad9cbb04a9dc` | acb88611e1de8fbe7ed6e195ba76ad9cbb04a9dc |
+| third_party/stb | `4e9b368bfc071e97206ea5c6adba68dd0cbf8897` | 003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5 |
+| third_party/tc_astcenc | `2bed807e63d5bd756d26cd00604e5ae3b86e3348` | 5.7.0 |
+| third_party/tc_bcdec | `80859ed3b7afb1c527a2a99d70c61457bea72d0c` | 80859ed3b7afb1c527a2a99d70c61457bea72d0c |
+| third_party/tc_etcdec | `972875d403ed8ac27e0f35c2f29d819e710a688a` | 972875d403ed8ac27e0f35c2f29d819e710a688a |
+| third_party/tl_expected | `1770e3559f2f6ea4a5fb4f577ad22aeb30fbd8e4` | 1770e3559f2f6ea4a5fb4f577ad22aeb30fbd8e4 |
+| assets/sources/tinyrenderer | `97eb7a480e762285899a93c5d21e70a79e60782e` | resource source, not a build dependency |

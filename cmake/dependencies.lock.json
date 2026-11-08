@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "notes": "Locked local source HEADs; upstreamPin records unmodified upstream declarations, not proof of compatibility. Qt/Vulkan SDK/Clang are system dependencies.",
+  "notes": "Locked local source HEADs; upstreamPin records unmodified upstream declarations, not proof of compatibility. Qt/Vulkan SDK/Clang are system dependencies. P10 cross-checked all 14 full SHAs against approved design section 7; pins and source declarations unchanged. Model permission is separately described in licenses/ASSET_NOTICES.txt.",
   "records": [
     {
       "path": "third_party/cgltf",

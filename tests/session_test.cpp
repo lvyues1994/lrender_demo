@@ -272,18 +272,22 @@ TEST_CASE("session/cpu_smoke-real-senders-owned-pixels-and-history") {
   s->setRenderOptions(options);
   REQUIRE(test::until([&] { return s->snapshot()->performance.accumulatedSamples >= 2; }));
   s->pause();
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  auto sampleBegin = h.samples.size();
+  auto sampleStarts = s->snapshot()->performance.sampleOneFrames;
   auto generation = s->snapshot()->generation;
   CameraState camera;
   camera.camera.position.x = 0.1f;
   s->setCamera(camera);
   s->resume();
   REQUIRE(test::until([&] {
-    return s->snapshot()->generation > generation && s->snapshot()->performance.accumulatedSamples >= 1;
+    return s->snapshot()->performance.sampleOneFrames > sampleStarts && h.samples.size() > sampleBegin;
   }));
   CHECK(s->snapshot()->backend == "cpu");
   CHECK(s->snapshot()->performance.completed > 1);
   auto newGeneration = s->snapshot()->generation;
-  auto first = std::find_if(h.samples.begin(), h.samples.end(),
+  CHECK(s->snapshot()->generation == generation);
+  auto first = std::find_if(h.samples.begin() + sampleBegin, h.samples.end(),
                             [&](auto pair) { return pair.first == newGeneration; });
   REQUIRE(first != h.samples.end());
   CHECK(first->second == 1);
@@ -866,4 +870,92 @@ TEST_CASE("session/p9-lighting-value-command-updates-real-delta-without-camera-t
   h.complete(1);
   s->requestStop();
   REQUIRE(test::until([&] { return h.stopped; }));
+}
+
+TEST_CASE("session/p10-snapshot-real-appearance-and-stop-rejects-changes") {
+  Harness h;
+  auto s = session(h);
+  s->setAmbient(.8f);
+  s->setRoughness(.3f);
+  s->setNormalMapping(false);
+  CHECK(s->snapshot()->ambient == doctest::Approx(.8));
+  CHECK(s->snapshot()->roughness == doctest::Approx(.3));
+  CHECK_FALSE(s->snapshot()->normalMapping);
+  s->requestStop();
+  s->setAmbient(1.7f);
+  s->setRoughness(.9f);
+  s->setNormalMapping(true);
+  CHECK(s->snapshot()->ambient == doctest::Approx(.8));
+  CHECK(s->snapshot()->roughness == doctest::Approx(.3));
+  CHECK_FALSE(s->snapshot()->normalMapping);
+  stop(*s, h);
+}
+
+TEST_CASE("session/p10-pt-camera-real-cpu-keeps-target-and-sample-one") {
+  Harness h;
+  auto r = resources();
+  std::vector<std::string> stages;
+  auto adapter = std::make_unique<ReadbackAdapter>(h.imageEvents(), [&](auto stage, Done done) {
+    stages.push_back(stage);
+    done(std::monostate{});
+  });
+  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world), std::move(adapter),
+                  SubmitFrame{}, h.events());
+  h.readSnapshot = [&] { return s.snapshot(); };
+  start(s);
+  REQUIRE(test::until([&] { return s.snapshot()->performance.accumulatedSamples >= 2; }));
+  s.pause();
+  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
+  auto generation = s.snapshot()->generation;
+  auto begin = h.samples.size();
+  auto starts = s.snapshot()->performance.sampleOneFrames;
+  auto c = s.snapshot()->camera;
+  c.camera.position.x += .2f;
+  s.setCamera(c);
+  s.resume();
+  REQUIRE(test::until(
+      [&] { return s.snapshot()->performance.sampleOneFrames > starts && h.samples.size() > begin; }));
+  s.pause();
+  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
+  CHECK(s.snapshot()->generation == generation);
+  CHECK(h.samples[begin].second == 1);
+  CHECK(stages == std::vector<std::string>{"prepare"});
+  stop(s, h);
+}
+TEST_CASE("session/p10-taa-camera-real-target-preserved-cut-only-next-submit") {
+  Harness h;
+  auto r = resources();
+  std::vector<std::string> stages;
+  auto adapter = std::make_unique<ReadbackAdapter>(h.imageEvents(), [&](auto stage, Done done) {
+    stages.push_back(stage);
+    done(std::monostate{});
+  });
+  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world), std::move(adapter),
+                  h.submit(), h.events());
+  s.setViewport({{8, 8}, {8, 8}, 1});
+  s.setRenderOptions({PipelineKind::Visibility, 1, true});
+  s.start();
+  REQUIRE(test::until([&] { return h.jobs.size() == 2; }));
+  s.pause();
+  h.complete(0);
+  h.complete(1);
+  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
+  auto target = h.jobs[1].frame.views[0].target;
+  auto gen = s.snapshot()->generation;
+  auto c = s.snapshot()->camera;
+  c.camera.position.x += .2f;
+  s.setCamera(c);
+  s.resume();
+  REQUIRE(test::until([&] { return h.jobs.size() == 4; }));
+  CHECK(s.snapshot()->generation == gen);
+  CHECK(h.jobs[2].frame.views[0].target == target);
+  CHECK(h.jobs[2].frame.views[0].cameraCut);
+  CHECK_FALSE(h.jobs[3].frame.views[0].cameraCut);
+  CHECK(h.jobs[2].frame.views[0].camera.position.x == doctest::Approx(.2));
+  CHECK(h.jobs[2].frame.delta.meshes.empty());
+  CHECK(stages == std::vector<std::string>{"prepare"});
+  s.requestStop();
+  h.complete(2);
+  h.complete(3);
+  stop(s, h);
 }

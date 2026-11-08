@@ -1,8 +1,10 @@
 #include "presentation/ReadbackAdapter.h"
 #include "ui/MainWindow.h"
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QLabel>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <doctest/doctest.h>
@@ -226,4 +228,65 @@ TEST_CASE("ui/real-gui-surface-handshake-serializes-injected-driver-boundary") {
   CHECK(gui);
   CHECK(lease->policy->canRelease());
   factory.releaseHost();
+}
+
+TEST_CASE("ui/p10-appearance-sync-and-rejected-command-no-feedback") {
+  int commands = 0;
+  UiCommands c;
+  c.ambient = [&](float) { ++commands; };
+  c.roughness = [&](float) { ++commands; };
+  c.normalMapping = [&](bool) { ++commands; };
+  MainWindow window(c);
+  auto snap = std::make_shared<SessionSnapshot>();
+  snap->ambient = .8f;
+  snap->roughness = .2f;
+  snap->normalMapping = false;
+  window.showSnapshot(snap);
+  auto a = window.findChild<QDoubleSpinBox *>("ambient");
+  auto r = window.findChild<QDoubleSpinBox *>("roughness");
+  auto n = window.findChild<QCheckBox *>("normal");
+  CHECK(a->value() == doctest::Approx(.8));
+  CHECK(r->value() == doctest::Approx(.2));
+  CHECK_FALSE(n->isChecked());
+  CHECK(commands == 0);
+  a->setValue(1.5);
+  r->setValue(.9);
+  n->setChecked(true);
+  CHECK(commands == 3);
+  CHECK(a->value() == doctest::Approx(.8));
+  CHECK(r->value() == doctest::Approx(.2));
+  CHECK_FALSE(n->isChecked());
+}
+
+TEST_CASE("ui/p10-performance-is-labelled-not-fake-gpu-or-scanout") {
+  MainWindow w({});
+  auto s = std::make_shared<SessionSnapshot>();
+  s->backend = "vulkan";
+  s->device = "test GPU";
+  s->performance.completed = 10;
+  s->performance.displayed = 8;
+  s->performance.dropped = 2;
+  s->performance.inFlight = 1;
+  s->performance.accumulatedSamples = 3;
+  s->performance.completionFps = 20;
+  s->performance.hostPrepareMs = 1.5;
+  s->performance.frameWallMs = 8;
+  s->ambient = 12;
+  w.showSnapshot(s);
+  CHECK(w.findChild<QDoubleSpinBox *>("ambient")->value() == 12);
+  auto label = w.findChild<QLabel *>("performance");
+  REQUIRE(label);
+  auto text = label->text();
+  CHECK(text.contains("completion FPS"));
+  CHECK(text.contains("CPU GUI prepare"));
+  CHECK(text.contains("submit-to-device"));
+  CHECK(text.contains("GPU unavailable"));
+  CHECK(text.contains("inflight=1"));
+  CHECK(text.contains("dropped=2"));
+  CHECK(text.contains("samples=3"));
+  s->performance.gpuPassTotalMs = 4;
+  w.showSnapshot(s);
+  CHECK(label->text().contains("GPU pass sum"));
+  CHECK(label->text().contains("profiling serializes"));
+  CHECK_FALSE(label->text().contains("GPU unavailable"));
 }

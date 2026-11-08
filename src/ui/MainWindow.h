@@ -21,9 +21,11 @@ private:
   QComboBox *model_ = nullptr, *pipeline_ = nullptr;
   QDoubleSpinBox *exposure_ = nullptr;
   QCheckBox *taa_ = nullptr;
-  QLabel *status_ = nullptr;
+  QLabel *status_ = nullptr, *performance_ = nullptr;
   bool closing_ = false, stopped_ = false;
   lr::core::Aabb bounds_{{-1, -1, -1}, {1, 1, 1}};
   void optionsChanged();
+  SessionSnapshotPtr lastSnapshot_;
+  void restoreAppearance();
 };
 } // namespace demo

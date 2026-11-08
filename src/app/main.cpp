@@ -1,4 +1,5 @@
 #include "assets/AssetLoader.h"
+#include "assets/AssetRoot.h"
 #include "presentation/VulkanSharedAdapter.h"
 #include "render/RenderSession.h"
 #include "ui/MainWindow.h"
@@ -9,6 +10,7 @@
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
+#include <QLabel>
 #include <QMouseEvent>
 #include <QPlatformSurfaceEvent>
 #include <QScreen>
@@ -41,8 +43,9 @@ struct Viewer : QObject {
   bool sawSampleOne = false;
   std::uint64_t sampleOneAtCamera = 0;
   SessionGeneration cameraGeneration = 0;
+  WId cameraHost = 0;
   QElapsedTimer elapsed, phase;
-  QTimer heartbeat, script;
+  QTimer heartbeat, script, statistics;
   std::optional<std::future<lr::render::ImageRgba8>> capture;
   std::vector<std::uint32_t> normalPixels;
   struct Joined {
@@ -58,7 +61,8 @@ struct Viewer : QObject {
   };
   using Join = lexec::connect_result_t<decltype(std::declval<lexec::counting_scope &>().join()), Joined>;
   std::unique_ptr<Join> joined;
-  Viewer(QApplication &a, std::string b, std::string p, std::string m, std::string t, std::string shot)
+  Viewer(QApplication &a, std::string b, std::string p, std::string m, std::string t, std::string shot,
+         std::filesystem::path assetRoot)
       : app(a), backend(b), mode(p), model(m), test(t), screenshot(shot) {
     pool.setMaxThreadCount(2);
     elapsed.start();
@@ -111,7 +115,11 @@ struct Viewer : QObject {
     if (!test.empty())
       window->viewport().setFixedSize(160, 120);
     window->show();
-    loader = std::make_unique<AssetLoader>(&pool, gui.get_scheduler(), root.get_token());
+    loader = std::make_unique<AssetLoader>(&pool, gui.get_scheduler(), root.get_token(),
+                                           [assetRoot](auto const &entry, auto stop) {
+                                             return decodeAssetAtRoot(entry, assetRoot, std::move(stop));
+                                           });
+    std::cout << "asset root=" << assetRoot << std::endl;
     auto box = std::make_shared<Bootstrap>();
     auto work = lexec::schedule(lqtexec::ThreadPoolScheduler{&pool}) | lexec::then([box, b]() noexcept {
                   try {
@@ -154,6 +162,12 @@ struct Viewer : QObject {
                                     }
                                   }),
                  root.get_token());
+    statistics.setInterval(500);
+    connect(&statistics, &QTimer::timeout, this, [this] {
+      if (session && window)
+        window->showSnapshot(session->snapshot());
+    });
+    statistics.start();
     script.setInterval(20);
     connect(&script, &QTimer::timeout, this, [this] {
       if (elapsed.elapsed() > 45000) {
@@ -219,7 +233,7 @@ struct Viewer : QObject {
     events.onSnapshot = [this](auto s) {
       if (s->warnings.size() > warningCount) {
         warningCount = s->warnings.size();
-        std::cout << "fallback reason=" << s->warnings.back() << std::endl;
+        std::cout << "session warning=" << s->warnings.back() << std::endl;
       }
       if (window)
         window->showSnapshot(s);
@@ -277,6 +291,7 @@ struct Viewer : QObject {
     if (finishing)
       return;
     finishing = true;
+    statistics.stop();
     closing = true;
     script.stop();
     if (session) {
@@ -384,8 +399,10 @@ struct Viewer : QObject {
       {
         auto c = s->camera;
         c.camera.position.x += .1f;
+        cameraGeneration = s->generation;
+        cameraHost = window->viewport().nativeWindow() ? window->viewport().nativeWindow()->winId() : 0;
         session->setCamera(c);
-        cameraGeneration = session->snapshot()->generation;
+        if(session->snapshot()->generation!=cameraGeneration)throw std::runtime_error("camera changed presentation generation");
         sampleOneAtCamera = session->snapshot()->performance.sampleOneFrames;
         phase.restart();
       }
@@ -395,6 +412,11 @@ struct Viewer : QObject {
     case 3:
       if (!sawSampleOne || s->performance.accumulatedSamples < 2)
         return;
+      if (s->generation != cameraGeneration ||
+          (cameraHost &&
+           (!window->viewport().nativeWindow() || window->viewport().nativeWindow()->winId() != cameraHost)))
+        throw std::runtime_error("PT camera unexpectedly rebuilt presentation");
+      std::cout << "PT camera reuse host=" << cameraHost << " generation=" << cameraGeneration << std::endl;
       std::cout << "pathtrace camera sampleOne=" << sawSampleOne << " transitionMs=" << phase.elapsed()
                 << " completed=" << completed << std::endl;
       session->setRenderOptions({PipelineKind::Visibility, 1, true});
@@ -407,6 +429,8 @@ struct Viewer : QObject {
       {
         auto c = s->camera;
         c.camera.position.x -= .1f;
+        cameraGeneration = s->generation;
+        cameraHost = window->viewport().nativeWindow() ? window->viewport().nativeWindow()->winId() : 0;
         session->setCamera(c);
       }
       lastCompleted = completed;
@@ -416,6 +440,11 @@ struct Viewer : QObject {
     case 5:
       if (completed < lastCompleted + 2)
         return;
+      if (s->generation != cameraGeneration ||
+          (cameraHost &&
+           (!window->viewport().nativeWindow() || window->viewport().nativeWindow()->winId() != cameraHost)))
+        throw std::runtime_error("TAA camera unexpectedly rebuilt presentation");
+      std::cout << "TAA camera reuse host=" << cameraHost << " generation=" << cameraGeneration << std::endl;
       std::cout << "TAA camera transitionMs=" << phase.elapsed() << std::endl;
       session->setRenderOptions({PipelineKind::Visibility, 1, false});
       window->viewport().hide();
@@ -486,6 +515,8 @@ struct Viewer : QObject {
               ->grabWindow(own->winId())
               .save(QString::fromStdString(screenshot + "-native-window.png"));
       }
+      std::cout << "performance UI: " << window->findChild<QLabel *>("performance")->text().toStdString()
+                << std::endl;
       std::cout << "scenario full latest installed=" << s->installedModel->value
                 << " sharedShown=" << s->performance.sharedShown << " GUI ticks=" << beats
                 << " DPR=" << window->viewport().devicePixelRatioF() << std::endl;
@@ -546,6 +577,7 @@ int main(int argc, char **argv) {
   args.addHelpOption();
   args.addOption({"backend", "Renderer backend (cpu only when explicit)", "backend", "vulkan"});
   args.addOption({"presentation", "auto|shared|readback", "presentation", "auto"});
+  args.addOption({"asset-root", "TinyRenderer resource root (contains LICENSE.txt and obj)", "path"});
   args.addOption({"model", "Catalog model", "model", "african_head"});
   args.addOption({"self-test", "P9 bounded interactions: full|close-load|close-install", "test"});
   args.addOption({"screenshot", "Local PNG output prefix", "path"});
@@ -556,7 +588,17 @@ int main(int argc, char **argv) {
     std::cerr << "invalid backend/presentation" << std::endl;
     return 1;
   }
+  std::filesystem::path assetRoot;
+  try {
+    assetRoot = demo::validateAssetRoot(args.isSet("asset-root")
+                                            ? std::filesystem::path(args.value("asset-root").toStdString())
+                                            : demo::defaultAssetRoot());
+  } catch (std::exception const &e) {
+    std::cerr << "asset root error: " << e.what() << std::endl;
+    return 1;
+  }
   demo::Viewer viewer(app, backend, mode, args.value("model").toStdString(),
-                      args.value("self-test").toStdString(), args.value("screenshot").toStdString());
+                      args.value("self-test").toStdString(), args.value("screenshot").toStdString(),
+                      assetRoot);
   return app.exec();
 }

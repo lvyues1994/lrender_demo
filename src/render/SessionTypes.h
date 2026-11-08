@@ -38,10 +38,12 @@ struct PerformanceSnapshot {
     std::uint64_t sampleOneFrames = 0; // accepted actual ViewStats receipts; survives snapshot coalescing
     std::uint64_t deltaExtractions = 0; // successful real World::extractDelta calls
     std::uint64_t completed = 0, displayed = 0, dropped = 0, sharedShown = 0;
-    double windowSeconds = 0;
+    double windowSeconds = 0, completionFps = 0;
     std::optional<double> hostPrepareMs, frameWallMs, presenterLatencyMs, gpuPassTotalMs;
 };
 struct SessionSnapshot {
+    float ambient = .25f, roughness = .5f;
+    bool normalMapping = true;
     LifeState life = LifeState::Idle;
     PresentationPath path = PresentationPath::Readback;
     SessionGeneration generation = 0;
@@ -57,7 +59,7 @@ struct SessionSnapshot {
     PerformanceSnapshot performance;
     std::optional<RenderError> error; // last reported issue; life identifies active/terminal failure
     std::string backend, device;
-    std::vector<std::string> warnings;
+    std::vector<std::string> warnings, assetNotices;
 };
 using SessionSnapshotPtr = std::shared_ptr<SessionSnapshot const>;
 using Done = std::function<void(Result<std::monostate>)>;

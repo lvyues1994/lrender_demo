@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "sourceUrl": "https://github.com/ssloy/tinyrenderer",
+  "sourceSha": "97eb7a480e762285899a93c5d21e70a79e60782e",
+  "runtimeContract": "Descriptive fixed catalog, checked against C++ AssetCatalog; not a general external OBJ/MTL importer. --asset-root changes the resource directory, not trusted relative paths.",
+  "textureSemantics": {
+    "diffuse": "sRGB",
+    "emissive": "sRGB",
+    "normal": "linear tangent-space nm_tangent",
+    "specularUnbound": "linear decoded provenance only; not uploaded and never metallic"
+  },
+  "coordinates": "RGBA top row first; OBJ v flipped exactly once",
+  "materialApproximation": {
+    "metallic": 0,
+    "roughness": 0.5,
+    "gloss": "unmapped; UI roughness overrides all installer-owned materials"
+  },
+  "softwareLicense": "LICENSE.txt does not grant model redistribution rights",
+  "models": [
+    {
+      "id": "african_head",
+      "parts": [
+        {
+          "obj": "obj/african_head/african_head.obj",
+          "diffuse": "obj/african_head/african_head_diffuse.tga",
+          "normal": "obj/african_head/african_head_nm_tangent.tga",
+          "emissive": "",
+          "specularUnbound": "obj/african_head/african_head_spec.tga"
+        },
+        {
+          "obj": "obj/african_head/african_head_eye_inner.obj",
+          "diffuse": "obj/african_head/african_head_eye_inner_diffuse.tga",
+          "normal": "obj/african_head/african_head_eye_inner_nm_tangent.tga",
+          "emissive": "",
+          "specularUnbound": "obj/african_head/african_head_eye_inner_spec.tga"
+        },
+        {
+          "obj": "obj/african_head/african_head_eye_outer.obj",
+          "diffuse": "obj/african_head/african_head_eye_outer_diffuse.tga",
+          "normal": "obj/african_head/african_head_eye_outer_nm_tangent.tga",
+          "emissive": "",
+          "specularUnbound": "obj/african_head/african_head_eye_outer_spec.tga"
+        }
+      ],
+      "noticePath": "obj/african_head/readme.txt",
+      "noticeKind": "example-email",
+      "permissionLimit": "Vidar Rapp: example in original renderer; no blanket commercial redistribution grant",
+      "visuallyCertified": false
+    },
+    {
+      "id": "diablo",
+      "parts": [
+        {
+          "obj": "obj/diablo3_pose/diablo3_pose.obj",
+          "diffuse": "obj/diablo3_pose/diablo3_pose_diffuse.tga",
+          "normal": "obj/diablo3_pose/diablo3_pose_nm_tangent.tga",
+          "emissive": "obj/diablo3_pose/diablo3_pose_glow.tga",
+          "specularUnbound": "obj/diablo3_pose/diablo3_pose_spec.tga"
+        }
+      ],
+      "noticePath": "obj/diablo3_pose/readme.txt",
+      "noticeKind": "email-fragment",
+      "permissionLimit": "Samuel (arshlevon) Sharit: Go for it! fragment; no wider grant inferred",
+      "visuallyCertified": false
+    },
+    {
+      "id": "boggie",
+      "parts": [
+        {
+          "obj": "obj/boggie/body.obj",
+          "diffuse": "obj/boggie/body_diffuse.tga",
+          "normal": "obj/boggie/body_nm_tangent.tga",
+          "emissive": "",
+          "specularUnbound": "obj/boggie/body_spec.tga"
+        },
+        {
+          "obj": "obj/boggie/head.obj",
+          "diffuse": "obj/boggie/head_diffuse.tga",
+          "normal": "obj/boggie/head_nm_tangent.tga",
+          "emissive": "",
+          "specularUnbound": "obj/boggie/head_spec.tga"
+        },
+        {
+          "obj": "obj/boggie/eyes.obj",
+          "diffuse": "obj/boggie/eyes_diffuse.tga",
+          "normal": "obj/boggie/eyes_nm_tangent.tga",
+          "emissive": "",
+          "specularUnbound": "obj/boggie/eyes_spec.tga"
+        }
+      ],
+      "noticePath": "obj/boggie/readme.txt",
+      "noticeKind": "educational",
+      "permissionLimit": "Bojana Nedeljkovic: permission for original educational project",
+      "visuallyCertified": false
+    },
+    {
+      "id": "floor",
+      "parts": [
+        {
+          "obj": "obj/floor.obj",
+          "diffuse": "obj/floor_diffuse.tga",
+          "normal": "obj/floor_nm_tangent.tga",
+          "emissive": "",
+          "specularUnbound": "obj/floor_spec.tga"
+        }
+      ],
+      "noticePath": "LICENSE.txt",
+      "noticeKind": "software-only-not-model-grant",
+      "permissionLimit": "no separate model grant found; software notice is provenance only",
+      "visuallyCertified": false
+    }
+  ]
+}
