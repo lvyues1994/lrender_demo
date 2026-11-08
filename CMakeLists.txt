@@ -55,3 +55,20 @@ add_test(NAME dependency_lock COMMAND "${Python3_EXECUTABLE}"
 set_tests_properties(dependency_lock PROPERTIES LABELS unit TIMEOUT 60)
 add_test(NAME dependency_lock_sources COMMAND "${CMAKE_COMMAND}" -P "${PROJECT_SOURCE_DIR}/cmake/VerifyDependencies.cmake")
 set_tests_properties(dependency_lock_sources PROPERTIES LABELS unit TIMEOUT 60)
+
+# P2's platform boundary is separate; demo_core remains INTERFACE until P3.
+add_library(demo_native_surface STATIC src/presentation/NativeSurfaceFactory.cpp)
+find_package(Vulkan REQUIRED)
+find_path(DEMO_XCB_INCLUDE_DIR xcb/xcb.h REQUIRED)
+find_library(DEMO_XCB_LIBRARY xcb REQUIRED)
+target_include_directories(demo_native_surface PRIVATE "${DEMO_XCB_INCLUDE_DIR}")
+target_link_libraries(demo_native_surface PUBLIC demo_core Vulkan::Vulkan PRIVATE "${DEMO_XCB_LIBRARY}")
+target_sources(demo_tests PRIVATE tests/native_surface_policy_test.cpp)
+target_link_libraries(demo_tests PRIVATE demo_native_surface)
+
+if(NOT TARGET lr::present_vulkan)
+  message(FATAL_ERROR "P2 requires the upstream Vulkan presenter target")
+endif()
+add_executable(demo_qt_vulkan_probe probes/qt_vulkan_probe.cpp)
+target_link_libraries(demo_qt_vulkan_probe PRIVATE demo_native_surface lr::present_vulkan Vulkan::Vulkan)
+demo_register(demo_qt_vulkan_probe platform)
