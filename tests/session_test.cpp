@@ -1,0 +1,540 @@
+#include "presentation/ReadbackAdapter.h"
+#include "render/RenderSession.h"
+#include "support/FakePresentation.h"
+#include "support/QtWait.h"
+#include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QThread>
+#include <QTimer>
+#include <algorithm>
+#include <atomic>
+#include <iostream>
+#include <lexec/execution.hpp>
+#include <lr/core/Primitives.h>
+using namespace demo;
+#include <doctest/doctest.h>
+namespace {
+lexec::static_thread_pool &fixturePool() {
+  static lexec::static_thread_pool pool{1};
+  return pool;
+}
+struct Joined {
+  using receiver_concept = lexec::receiver_t;
+  std::atomic<bool> *done;
+  void set_value() && noexcept { done->store(true); }
+};
+struct Resources {
+  std::unique_ptr<lr::runtime::Runtime> runtime;
+  std::unique_ptr<lr::render::Renderer> renderer;
+  std::unique_ptr<lr::scene::World> world;
+};
+Resources resources() {
+  Resources r;
+  std::exception_ptr failure;
+  lexec::simple_counting_scope scope;
+  lexec::spawn(lexec::schedule(fixturePool().get_scheduler()) | lexec::then([&]() noexcept {
+                 try {
+                   lr::runtime::RuntimeConfig config;
+                   config.framePoolThreads = 2;
+                   config.backgroundPoolThreads = 1;
+                   config.ioWorkers = 1;
+                   r.runtime = lr::runtime::makeRuntime(config);
+                   lr::render::RendererConfig rc;
+                   rc.backend = "cpu";
+                   rc.runtime = r.runtime.get();
+                   rc.framesInFlight = 2;
+                   r.renderer = lr::render::makeRenderer(rc);
+                   r.world = lr::scene::makeWorld({}); // serial host propagation, no GUI wait on frame pool
+                   auto mesh = std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({0.5f, 0.5f}));
+                   r.world->spawnInstance(mesh, lr::core::Transform::identity());
+                   r.world->setEnvironment({lr::core::vec3{0.25f}});
+                 } catch (...) {
+                   failure = std::current_exception();
+                 }
+               }),
+               scope.get_token());
+  scope.close();
+  std::atomic<bool> joined{false};
+  auto join = lexec::connect(scope.join(), Joined{&joined});
+  lexec::start(join);
+  if (!test::until([&] { return joined.load(); })) {
+    std::cerr << "CPU fixture initialization exceeded bounded wait\n";
+    std::_Exit(2);
+  }
+  if (failure)
+    std::rethrow_exception(failure);
+  return r;
+}
+struct Job {
+  lr::render::FrameDesc frame;
+  FrameStamp stamp;
+  std::function<void(FrameCompletion)> done;
+};
+struct Harness {
+  std::vector<Job> jobs;
+  unsigned images = 0;
+  std::vector<RenderError> errors;
+  bool stopped = false;
+  bool throwAfterAccept = false;
+  bool throwNonStandard = false;
+  std::function<SessionSnapshotPtr()> readSnapshot;
+  std::vector<std::pair<SessionGeneration, unsigned>> samples;
+  std::optional<OwnedFrame> lastImage;
+  SubmitFrame submit() {
+    return [this](auto frame, auto stamp, auto done) {
+      jobs.push_back({std::move(frame), stamp, std::move(done)});
+      if (throwNonStandard)
+        throw 42;
+      if (throwAfterAccept)
+        throw std::runtime_error("ambiguous acceptance");
+    };
+  }
+  PresentationEvents imageEvents() {
+    return {[this](auto frame) {
+              REQUIRE(frame.image);
+              ++images;
+              if (readSnapshot)
+                samples.emplace_back(frame.stamp.generation, readSnapshot()->performance.accumulatedSamples);
+              lastImage = std::move(frame);
+            },
+            [this](auto e) { errors.push_back(std::move(e)); }};
+  }
+  SessionEvents events() {
+    return {{}, [this](auto e) { errors.push_back(std::move(e)); }, [this] { stopped = true; }};
+  }
+  void complete(std::size_t n, bool error = false) {
+    auto &j = jobs.at(n);
+    if (error) {
+      j.done({j.stamp, RenderError{ErrorStage::Submit, false, "device failed", "original failure"}});
+      return;
+    }
+    lr::render::FrameResult r;
+    lr::render::ViewResult v;
+    v.view = j.frame.views.at(0).id;
+    v.target = j.frame.views.at(0).target;
+    lr::render::ImageRgba8 image;
+    image.extent = {8, 8};
+    image.pixels.resize(64, 0xff0000ff);
+    v.image = std::move(image);
+    r.views.push_back(std::move(v));
+    j.done({j.stamp, std::move(r)});
+  }
+};
+std::unique_ptr<RenderSession> session(Harness &h, bool real = false) {
+  auto r = resources();
+  return std::make_unique<RenderSession>(std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+                                         std::make_unique<ReadbackAdapter>(h.imageEvents()),
+                                         real ? SubmitFrame{} : h.submit(), h.events());
+}
+void start(RenderSession &s, bool continuous = true) {
+  s.setViewport({{8, 8}, {8, 8}, 1});
+  RenderOptions options;
+  options.pipeline = continuous ? PipelineKind::Pathtrace : PipelineKind::Visibility;
+  s.setRenderOptions(options);
+  s.start();
+}
+void stop(RenderSession &s, Harness &h) {
+  s.requestStop();
+  REQUIRE(test::until([&] { return h.stopped; }));
+  CHECK(s.snapshot()->life == LifeState::Stopped);
+}
+} // namespace
+TEST_CASE("session/cap-real-delta-latest-camera-and-stable-view") {
+  Harness h;
+  auto s = session(h);
+  CameraState camera;
+  camera.camera.position.x = 1;
+  s->setCamera(camera);
+  camera.camera.position.x = 2;
+  s->setCamera(camera);
+  start(*s);
+  REQUIRE(test::until([&] { return h.jobs.size() == 2; }));
+  CHECK(s->snapshot()->performance.inFlight == 2);
+  CHECK(s->snapshot()->performance.deltaExtractions == 2);
+  CHECK(h.jobs[0].frame.delta.meshes.size() == 1);
+  CHECK(h.jobs[1].frame.delta.meshes.empty());
+  CHECK(h.jobs[1].frame.delta.instances.empty());
+  CHECK(h.jobs[0].frame.views[0].camera.position.x == 2);
+  CHECK(h.jobs[0].frame.views[0].id == h.jobs[1].frame.views[0].id);
+  for (int i = 0; i != 1000; ++i) {
+    RenderOptions options;
+    options.pipeline = PipelineKind::Pathtrace;
+    options.exposure = 1 + i * 0.001f;
+    s->setRenderOptions(options);
+  }
+  CHECK(s->snapshot()->performance.deltaExtractions == 2);
+  s->requestStop();
+  h.complete(0);
+  h.complete(1);
+  stop(*s, h);
+  CHECK(h.images == 0);
+}
+TEST_CASE("session/resize-old-completions-drain-not-display-no-resource-replay") {
+  Harness h;
+  auto s = session(h);
+  start(*s);
+  REQUIRE(test::until([&] { return h.jobs.size() == 2; }));
+  auto generation = s->snapshot()->generation;
+  s->setViewport({{9, 8}, {9, 8}, 1});
+  h.complete(0);
+  h.complete(1);
+  REQUIRE(test::until([&] { return h.jobs.size() == 4; }));
+  CHECK(h.images == 0);
+  CHECK(s->snapshot()->generation > generation);
+  CHECK(h.jobs[2].frame.delta.meshes.empty());
+  CHECK(h.jobs[2].frame.views[0].id == h.jobs[0].frame.views[0].id);
+  s->requestStop();
+  h.complete(2);
+  h.complete(3);
+  stop(*s, h);
+}
+TEST_CASE("session/ambiguous-submit-capacity-two-fault-cannot-resume-or-reextract") {
+  Harness h;
+  h.throwAfterAccept = true;
+  auto s = session(h);
+  start(*s);
+  REQUIRE(test::until([&] { return h.jobs.size() == 1 && s->snapshot()->life == LifeState::Failed; }));
+  auto extracted = s->snapshot()->performance.deltaExtractions;
+  s->resume();
+  s->pause();
+  s->resume();
+  RenderOptions options;
+  options.pipeline = PipelineKind::Pathtrace;
+  options.exposure = 3;
+  s->setRenderOptions(options);
+  CHECK(h.jobs.size() == 1);
+  CHECK(s->snapshot()->performance.inFlight == 1);
+  CHECK(s->snapshot()->performance.deltaExtractions == extracted);
+  h.complete(0);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  s->resume();
+  CHECK(s->snapshot()->life == LifeState::Failed);
+  stop(*s, h);
+  CHECK(h.images == 0);
+}
+TEST_CASE("session/terminal-failure-duplicate-and-inline-completion-are-once") {
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() == 1; }));
+  h.complete(0, true);
+  h.complete(0, true);
+  REQUIRE(test::until([&] { return s->snapshot()->life == LifeState::Failed; }));
+  CHECK(s->snapshot()->performance.completed == 1);
+  stop(*s, h);
+  Harness inlineHarness;
+  auto r = resources();
+  unsigned calls = 0;
+  SubmitFrame inlineSubmit = [&](auto, auto stamp, auto done) {
+    ++calls;
+    done({stamp, lr::render::FrameResult{}});
+    done({stamp, lr::render::FrameResult{}});
+  };
+  RenderSession inlineSession(std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+                              std::make_unique<ReadbackAdapter>(PresentationEvents{}), inlineSubmit,
+                              inlineHarness.events());
+  start(inlineSession, false);
+  REQUIRE(test::until([&] { return inlineSession.snapshot()->performance.completed == 1; }));
+  CHECK(calls == 1);
+  stop(inlineSession, inlineHarness);
+}
+TEST_CASE("session/zero-extent-pause-no-extract-and-close-before-prepare") {
+  Harness h;
+  auto s = session(h);
+  s->setViewport({});
+  s->start();
+  s->resume();
+  CHECK(s->snapshot()->performance.deltaExtractions == 0);
+  CHECK(h.jobs.empty());
+  s->setViewport({{8, 8}, {8, 8}, 1});
+  s->requestStop();
+  stop(*s, h);
+  CHECK(h.jobs.empty());
+}
+TEST_CASE("session/without-p8-loader-selectmodel-reports-load-not-fake-assets") {
+  Harness h;
+  auto s = session(h);
+  s->selectModel({"not-loaded"});
+  REQUIRE_FALSE(h.errors.empty());
+  CHECK(h.errors.back().stage == ErrorStage::Load);
+  CHECK(s->snapshot()->request == 1);
+  stop(*s, h);
+}
+TEST_CASE("session/cpu_smoke-real-senders-owned-pixels-and-history") {
+  Harness h;
+  auto s = session(h, true);
+  h.readSnapshot = [&] { return s->snapshot(); };
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.images >= 1; }));
+  CHECK(s->snapshot()->performance.accumulatedSamples == 0);
+  RenderOptions options;
+  options.pipeline = PipelineKind::Pathtrace;
+  s->setRenderOptions(options);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.accumulatedSamples >= 2; }));
+  s->pause();
+  auto generation = s->snapshot()->generation;
+  CameraState camera;
+  camera.camera.position.x = 0.1f;
+  s->setCamera(camera);
+  s->resume();
+  REQUIRE(test::until([&] {
+    return s->snapshot()->generation > generation && s->snapshot()->performance.accumulatedSamples >= 1;
+  }));
+  CHECK(s->snapshot()->backend == "cpu");
+  CHECK(s->snapshot()->performance.completed > 1);
+  auto newGeneration = s->snapshot()->generation;
+  auto first = std::find_if(h.samples.begin(), h.samples.end(),
+                            [&](auto pair) { return pair.first == newGeneration; });
+  REQUIRE(first != h.samples.end());
+  CHECK(first->second == 1);
+  auto firstSamples = first->second;
+  stop(*s, h);
+  REQUIRE(h.lastImage);
+  auto image = ReadbackAdapter::copyImage(*h.lastImage->image);
+  h.lastImage.reset();
+  CHECK(image.pixelColor(0, 0).alpha() == 255);
+  std::cout << "CPU session smoke: backend=" << s->snapshot()->backend
+            << " completed=" << s->snapshot()->performance.completed << " images=" << h.images
+            << " extractions=" << s->snapshot()->performance.deltaExtractions
+            << " cameraGeneration=" << newGeneration << " firstSamples=" << firstSamples
+            << " finalInFlight=" << s->snapshot()->performance.inFlight
+            << " ownedQImageAlpha=" << image.pixelColor(0, 0).alpha() << "\n";
+}
+
+TEST_CASE("session/worker-command-rejected-before-mutation") {
+  Harness h;
+  auto s = session(h);
+  std::atomic<bool> rejected{false}, joined{false};
+  lexec::simple_counting_scope scope;
+  lexec::spawn(lexec::schedule(fixturePool().get_scheduler()) | lexec::then([&]() noexcept {
+                 try {
+                   s->requestStop();
+                 } catch (std::logic_error const &) {
+                   rejected = true;
+                 }
+               }),
+               scope.get_token());
+  scope.close();
+  auto operation = lexec::connect(scope.join(), Joined{&joined});
+  lexec::start(operation);
+  REQUIRE(test::until([&] { return joined.load(); }));
+  CHECK(rejected.load());
+  start(*s, false);
+  CHECK(test::until([&] { return h.jobs.size() == 1; }, 500));
+  s->requestStop();
+  if (!h.jobs.empty())
+    h.complete(0);
+  stop(*s, h);
+}
+TEST_CASE("session/presentation-worker-done-hops-gui-once-with-real-pool") {
+  lexec::simple_counting_scope scope;
+  unsigned calls = 0;
+  bool gui = false;
+  ReadbackAdapter a({}, [&](std::string, Done done) {
+    lexec::spawn(lexec::schedule(fixturePool().get_scheduler()) |
+                     lexec::then([done = std::move(done)]() noexcept {
+                       done(std::monostate{});
+                       done(std::monostate{});
+                     }),
+                 scope.get_token());
+  });
+  a.preparePath(PresentationPath::Readback, {}, [&](auto) {
+    ++calls;
+    gui = QThread::currentThread() == QCoreApplication::instance()->thread();
+  });
+  REQUIRE(test::until([&] { return calls == 1; }));
+  scope.close();
+  std::atomic<bool> joined{false};
+  auto join = lexec::connect(scope.join(), Joined{&joined});
+  lexec::start(join);
+  REQUIRE(test::until([&] { return joined.load(); }));
+  CHECK(gui);
+  CHECK(calls == 1);
+}
+TEST_CASE("session/close-held-candidate-without-target-confirms-optional-destroy") {
+  Harness h;
+  auto r = resources();
+  auto a = std::make_unique<FakePresentation>();
+  auto boundary = a.get();
+  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world), std::move(a), h.submit(),
+                  h.events());
+  start(s, false);
+  REQUIRE(test::until([&] { return boundary->stages().size() == 1; }));
+  s.requestStop();
+  CHECK_FALSE(h.stopped);
+  boundary->complete();
+  REQUIRE(test::until([&] { return boundary->stages().size() == 2; }));
+  CHECK(boundary->stages()[1] == "drain");
+  boundary->complete();
+  REQUIRE(test::until([&] { return boundary->stages().size() == 3; }));
+  CHECK(boundary->stages()[2] == "release");
+  boundary->complete();
+  REQUIRE(test::until([&] { return h.stopped; }));
+  CHECK(h.jobs.empty());
+  CHECK(s.snapshot()->performance.deltaExtractions == 0);
+}
+TEST_CASE("session/drain-failure-retains-target-until-explicit-retry") {
+  Harness h;
+  auto r = resources();
+  auto a = std::make_unique<FakePresentation>();
+  auto boundary = a.get();
+  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world), std::move(a), h.submit(),
+                  h.events());
+  start(s, false);
+  REQUIRE(test::until([&] { return boundary->stages().size() == 1; }));
+  boundary->complete();
+  REQUIRE(test::until([&] { return h.jobs.size() == 1; }));
+  h.complete(0);
+  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
+  s.requestStop();
+  REQUIRE(test::until([&] { return boundary->stages().size() == 2; }));
+  boundary->complete(RenderError{ErrorStage::Shutdown, true, "drain failed", "original drain fault"});
+  REQUIRE(test::until([&] { return !h.errors.empty(); }));
+  CHECK_FALSE(h.stopped);
+  CHECK(s.snapshot()->life == LifeState::Stopping);
+  s.resume();
+  CHECK(boundary->stages().size() == 2);
+  s.requestStop();
+  REQUIRE(test::until([&] { return boundary->stages().size() == 3; }));
+  CHECK(boundary->stages()[2] == "drain");
+  boundary->complete();
+  REQUIRE(test::until([&] { return boundary->stages().size() == 4; }));
+  boundary->complete();
+  REQUIRE(test::until([&] { return h.stopped; }));
+}
+TEST_CASE("session/wrapper-destruction-does-not-cancel-only-drain-notification") {
+  struct Tracked : ReadbackAdapter {
+    std::shared_ptr<std::atomic<bool>> destroyed;
+    explicit Tracked(std::shared_ptr<std::atomic<bool>> flag) : ReadbackAdapter({}), destroyed(flag) {}
+    ~Tracked() { destroyed->store(true); }
+  };
+  auto flag = std::make_shared<std::atomic<bool>>(false);
+  Harness h;
+  auto r = resources();
+  auto s = std::make_unique<RenderSession>(std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+                                           std::make_unique<Tracked>(flag), h.submit(), h.events());
+  start(*s);
+  REQUIRE(test::until([&] { return h.jobs.size() == 2; }));
+  s.reset();
+  CHECK_FALSE(flag->load());
+  h.complete(0);
+  h.complete(1);
+  REQUIRE(test::until([&] { return flag->load(); }));
+}
+namespace {
+struct FaultRenderer final : lr::render::Renderer {
+  std::unique_ptr<lr::render::Renderer> inner;
+  std::shared_ptr<std::atomic<QThread *>> destroyed;
+  std::shared_ptr<std::atomic<bool>> queued;
+  FaultRenderer(std::unique_ptr<lr::render::Renderer> renderer, std::shared_ptr<std::atomic<QThread *>> d,
+                std::shared_ptr<std::atomic<bool>> q)
+      : inner(std::move(renderer)), destroyed(d), queued(q) {}
+  ~FaultRenderer() override {
+    destroyed->store(QThread::currentThread());
+    QThread::msleep(30); /* injected latency to expose GUI-blocking cleanup */
+  }
+  tc::DeviceInfo const &deviceInfo() const noexcept override { return inner->deviceInfo(); }
+  lr::render::RendererCapabilities const &capabilities() const noexcept override {
+    return inner->capabilities();
+  }
+  lr::render::RenderTargets &targets() noexcept override { return inner->targets(); }
+  lr::render::PipelineRegistry &pipelines() noexcept override { return inner->pipelines(); }
+  lr::render::MaterialModels &materialModels() noexcept override { return inner->materialModels(); }
+  lr::render::FrameSender submit(lr::render::FrameDesc frame) override {
+    auto observer = inner->submit(std::move(frame));
+    queued->store(true);
+    throw std::runtime_error("after actual CPU enqueue, observer lost");
+  }
+  lr::render::KernelReloadSender reloadKernels(std::string directory) override {
+    return inner->reloadKernels(std::move(directory));
+  }
+};
+} // namespace
+TEST_CASE("session/real-enqueued-lost-observer-fault-closes-via-worker-renderer-barrier") {
+  Harness h;
+  auto r = resources();
+  auto destroyed = std::make_shared<std::atomic<QThread *>>(nullptr);
+  auto queued = std::make_shared<std::atomic<bool>>(false);
+  r.renderer = std::make_unique<FaultRenderer>(std::move(r.renderer), destroyed, queued);
+  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+                  std::make_unique<ReadbackAdapter>(h.imageEvents()), {}, h.events());
+  start(s);
+  REQUIRE(test::until([&] { return s.snapshot()->life == LifeState::Failed; }));
+  CHECK(queued->load());
+  CHECK(s.snapshot()->performance.deltaExtractions == 1);
+  CHECK(s.snapshot()->performance.inFlight == 1);
+  s.resume();
+  CHECK(s.snapshot()->performance.deltaExtractions == 1);
+  unsigned beats = 0;
+  QTimer heartbeat;
+  heartbeat.setInterval(1);
+  QObject::connect(&heartbeat, &QTimer::timeout, [&] { ++beats; });
+  heartbeat.start();
+  stop(s, h);
+  heartbeat.stop();
+  CHECK(beats > 0);
+  std::cout << "CPU terminal barrier: GUI heartbeat ticks=" << beats
+            << " (30ms injected destructor latency), renderer destroyed off GUI="
+            << (destroyed->load() != QCoreApplication::instance()->thread()) << "\n";
+  CHECK(s.snapshot()->performance.inFlight == 0);
+  CHECK(destroyed->load() != nullptr);
+  CHECK(destroyed->load() != QCoreApplication::instance()->thread());
+  CHECK(h.images == 0);
+}
+
+TEST_CASE("session/zero-extent-after-acceptance-drains-before-positive-restore") {
+  Harness h;
+  auto s = session(h);
+  start(*s);
+  REQUIRE(test::until([&] { return h.jobs.size() == 2; }));
+  auto target = h.jobs[0].frame.views[0].target;
+  s->setViewport({});
+  h.complete(0);
+  h.complete(1);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  s->resume();
+  QElapsedTimer elapsed;
+  elapsed.start();
+  REQUIRE(test::until([&] { return elapsed.elapsed() >= 20; }));
+  CHECK(h.jobs.size() == 2);
+  CHECK(h.images == 0);
+  CHECK(s->snapshot()->performance.deltaExtractions == 2);
+  s->setViewport({{8, 8}, {8, 8}, 1});
+  REQUIRE(test::until([&] { return h.jobs.size() == 4; }));
+  CHECK(h.jobs[2].frame.views[0].target != target);
+  CHECK(h.jobs[2].frame.delta.meshes.empty());
+  s->requestStop();
+  h.complete(2);
+  h.complete(3);
+  stop(*s, h);
+}
+
+TEST_CASE("session/nonstandard-ambiguous-submit-also-fault-latches") {
+  Harness h;
+  h.throwNonStandard = true;
+  auto s = session(h);
+  start(*s);
+  REQUIRE(test::until([&] { return s->snapshot()->life == LifeState::Failed; }));
+  s->resume();
+  CHECK(h.jobs.size() == 1);
+  CHECK(s->snapshot()->performance.deltaExtractions == 1);
+  h.complete(0);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+}
+
+TEST_CASE("session/image-delivery-fault-preserves-original-cause") {
+  Harness h;
+  auto r = resources();
+  PresentationEvents ev;
+  ev.onImage = [](auto) { throw std::runtime_error("original image observer failure"); };
+  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+                  std::make_unique<ReadbackAdapter>(ev), h.submit(), h.events());
+  start(s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() == 1; }));
+  h.complete(0);
+  REQUIRE(test::until([&] { return s.snapshot()->life == LifeState::Failed; }));
+  REQUIRE_FALSE(h.errors.empty());
+  CHECK(h.errors.back().cause == "original image observer failure");
+  stop(s, h);
+}

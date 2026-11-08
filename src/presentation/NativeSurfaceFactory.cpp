@@ -1,6 +1,7 @@
 #define VK_USE_PLATFORM_XCB_KHR
 #include "NativeSurfaceFactory.h"
 #include <QApplication>
+#include <QDebug>
 #include <QEvent>
 #include <QPlatformSurfaceEvent>
 #include <QThread>
@@ -61,7 +62,10 @@ void NativeSurfacePolicy::requireWorker() const {
 void NativeSurfacePolicy::setInvalidationHandler(std::function<void(std::uint64_t)> handler) {
     requireOwner(); std::uint64_t serial;
     { std::lock_guard<std::mutex> lock(mutex_); invalidated_=handler;serial=invalidationSerial_; }
-    if(handler && serial) handler(serial); // late subscriber sees already-invalid lease
+    if(handler && serial) {
+        try {handler(serial);} catch(std::exception const& e){qWarning()<<"Platform: invalidation observer failed:"<<e.what();}
+        catch(...){qWarning()<<"Platform: invalidation observer failed (unknown)";}
+    } // late subscriber sees already-invalid lease
 }
 std::uint64_t NativeSurfacePolicy::invalidationSerial() const {
     std::lock_guard<std::mutex> lock(mutex_);return invalidationSerial_;
@@ -73,7 +77,10 @@ void NativeSurfacePolicy::invalidate() {
       if(!alive_) return;
       alive_=false;serial=++invalidationSerial_;notify=invalidated_;
     }
-    if(notify) notify(serial); // GUI, outside lock; owner can stop admission immediately
+    if(notify) {
+        try {notify(serial);} catch(std::exception const& e){qWarning()<<"Platform: invalidation observer failed:"<<e.what();}
+        catch(...){qWarning()<<"Platform: invalidation observer failed (unknown)";}
+    } // GUI, outside lock; owner can stop admission immediately
 }
 void NativeSurfacePolicy::releaseHost() {
     requireOwner();
@@ -211,7 +218,9 @@ void NativeSurfaceFactory::releaseHost() {
 bool NativeSurfaceFactory::eventFilter(QObject *object, QEvent *event) {
     if (object == window_ && event->type() == QEvent::PlatformSurface &&
         static_cast<QPlatformSurfaceEvent *>(event)->surfaceEventType() == QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed)
-        lease_->policy->invalidate();
+        try {lease_->policy->invalidate();}
+        catch(std::exception const& e){qWarning()<<"Platform: native event boundary failed:"<<e.what();}
+        catch(...){qWarning()<<"Platform: native event boundary failed (unknown)";}
     return QObject::eventFilter(object, event);
 }
 } // namespace demo

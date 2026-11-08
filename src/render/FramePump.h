@@ -33,7 +33,9 @@ private:
 };
 // Caller boundary: known PRE-accept assembly failure -> retain pending delta,
 // complete(ticket), markDirty (unless closing). Ambiguous submit exception ->
-// pause; do NOT free/replay its ticket until acceptance/settlement is established.
+// latch an independent SESSION FAULT (not just soft pause); do NOT free/replay
+// its ticket until acceptance/settlement is established. User resume can clear
+// soft pause while capacity remains; the pump itself has no fault-recovery API.
 // Once submit returned its sender, work is already queued even before sender start;
 // attach an independent terminal observer, never treat sender cancellation as undo.
 // History reset is acknowledged by Session only after state applied + submit

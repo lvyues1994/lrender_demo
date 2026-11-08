@@ -200,3 +200,12 @@ TEST_CASE("native_surface/p4-actual-factory-platform-event-notifies-session-boun
  CHECK_FALSE(session.presentationReady(generation,demo::PresentationPath::VulkanShared));
  factory.releaseHost();CHECK(notifications==1);
 }
+
+TEST_CASE("native_surface/p6-throwing-invalidation-handler-is-contained-platform-error") {
+ demo::NativeSurfacePolicy policy;static QString captured;captured.clear();
+ auto old=qInstallMessageHandler(+[](QtMsgType,QMessageLogContext const&,QString const& text){captured+=text;});
+ policy.setInvalidationHandler([](auto){throw std::runtime_error("observer failed");});
+ CHECK_NOTHROW(policy.invalidate());
+ qInstallMessageHandler(old);
+ CHECK_FALSE(policy.hostAlive());CHECK(captured.contains("Platform"));CHECK(captured.contains("observer failed"));policy.releaseHost();
+}

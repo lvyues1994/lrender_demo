@@ -34,6 +34,8 @@ struct FrameStamp {
 struct OwnedFrame { FrameStamp stamp; std::shared_ptr<lr::render::ImageRgba8 const> image; };
 struct PerformanceSnapshot {
     std::uint32_t inFlight = 0;
+    std::uint32_t accumulatedSamples = 0; // actual latest accepted ViewStats, not fake GPU timing
+    std::uint64_t deltaExtractions = 0; // successful real World::extractDelta calls
     std::uint64_t completed = 0, displayed = 0, dropped = 0;
     double windowSeconds = 0;
     std::optional<double> hostPrepareMs, frameWallMs, presenterLatencyMs, gpuPassTotalMs;

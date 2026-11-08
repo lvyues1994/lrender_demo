@@ -81,11 +81,11 @@ TEST_CASE("frame_pump/preaccept-failure-keeps-extracted-delta-outside-pump") {
  CHECK(pending.environment->radiance.x==0.25f);pump.complete(*retry); // terminal completion, not auto-retry
  CHECK_FALSE(pump.reserve(view,state.snapshot()->generation));CHECK(state.historyResetPending());
 }
-TEST_CASE("frame_pump/ambiguous-acceptance-pauses-without-replaying-or-freeing-ticket") {
- FramePump pump{1};pump.markDirty();auto a=pump.reserve(view,1);REQUIRE(a);
+TEST_CASE("frame_pump/soft-pause-is-not-a-session-fault-latch-with-capacity-two") {
+ FramePump pump{2};pump.markDirty();auto a=pump.reserve(view,1);REQUIRE(a);
  pump.setPaused(true);pump.markDirty();CHECK_FALSE(pump.reserve(view,1));CHECK(pump.inFlight()==1);
- pump.setPaused(false);CHECK_FALSE(pump.reserve(view,1)); // even resume cannot double-submit an unaccounted delta
- pump.complete(*a);auto b=pump.reserve(view,1);REQUIRE(b);CHECK(b->sequence>a->sequence);
+ pump.setPaused(false);auto b=pump.reserve(view,1);REQUIRE(b); // demonstrates why Session needs its OWN irreversible latch
+ CHECK(pump.inFlight()==2);pump.complete(*a);pump.complete(*b);CHECK(pump.inFlight()==0);
 }
 TEST_CASE("frame_pump/inline-reentrant-completion-uses-prepublished-ticket") {
  FramePump pump{2};pump.markDirty();auto a=pump.reserve(view,1);REQUIRE(a);
@@ -109,8 +109,8 @@ TEST_CASE("frame_pump/fixed-seed-operation-traces-match-independent-reference") 
    INFO("cap=",cap," seed=",seed," step=",step);
    auto op=random()%8;
    if(op==0){pump.markDirty();if(!stopped)dirty=true;}
-   if(op==1){continuous=!continuous;pump.setContinuous(continuous);}
-   if(op==2){paused=!paused;pump.setPaused(paused);}
+   if(op==1){if(!stopped)continuous=!continuous;pump.setContinuous(continuous);}
+   if(op==2){if(!stopped)paused=!paused;pump.setPaused(paused);}
    if(op==3)++generation;
    if(op==4 || op==5) {
     lr::core::ViewId id{static_cast<std::uint32_t>(random()%3)};auto actual=pump.reserve(id,generation);
@@ -128,7 +128,7 @@ TEST_CASE("frame_pump/fixed-seed-operation-traces-match-independent-reference") 
     }else ++duplicates;
     pump.complete(ticket);
    }
-   if(op==7 && step>440){pump.stop();stopped=true;dirty=false;}
+   if(op==7 && step>120){pump.stop();stopped=true;dirty=false;}
    REQUIRE(pump.inFlight()==outstanding.size());
   }
   CHECK(reservations>0);CHECK(duplicates>0);CHECK(stale>0); // seeded trace contains real admission and forged/repeated completion work

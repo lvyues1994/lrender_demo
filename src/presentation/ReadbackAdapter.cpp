@@ -19,9 +19,9 @@ bool storageValid(lr::render::ImageRgba8 const& image) {
 }
 }
 struct ReadbackAdapter::Core {
- enum Phase { Cold,Preparing,Prepared,Ready,Draining,Drained,Releasing,Released } phase=Cold;
+ enum Phase { Cold,Preparing,Prepared,Ready,Draining,DrainFailed,Drained,Releasing,Released } phase=Cold;
  PresentationEvents events; PresentationBoundary boundary;
- std::uint64_t operation=0; SessionGeneration generation=0; ViewportExtent viewport;
+ std::uint64_t operation=0; SessionGeneration generation=0,highWater=0; ViewportExtent viewport;
  Done preparing; std::vector<Done> drains,releases;
  bool preparePending=false,drainStarted=false;
  void startDrain(std::shared_ptr<Core>);
@@ -42,7 +42,7 @@ void ReadbackAdapter::Core::startDrain(std::shared_ptr<Core> c) {
  if(drainStarted) return;drainStarted=true;
  demo::boundary(std::move(c),"drain",[](Core& c,auto result) {
   c.drainStarted=false;
-  c.phase=std::holds_alternative<RenderError>(result)?Core::Cold:Core::Drained;
+  c.phase=std::holds_alternative<RenderError>(result)?Core::DrainFailed:Core::Drained;
   auto callbacks=std::move(c.drains);c.drains.clear();
   if(auto e=std::get_if<RenderError>(&result)) c.report(*e);
   for(auto& cb:callbacks) cb(result);
@@ -89,6 +89,12 @@ void ReadbackAdapter::setFrameContext(SessionGeneration generation,ViewportExten
  gui();if(core_->phase!=Core::Ready) throw std::logic_error("frame acceptance requires probed path");
  if(generation==0 || extent.physical.x<0 || extent.physical.y<0 || extent.logical.x<0 || extent.logical.y<0)
   throw std::invalid_argument("invalid frame context");
+ auto const& old=core_->viewport;
+ if(generation<core_->highWater || (generation==core_->highWater &&
+   (core_->generation!=generation || old.logical.x!=extent.logical.x || old.logical.y!=extent.logical.y ||
+    old.physical.x!=extent.physical.x || old.physical.y!=extent.physical.y || old.dpr!=extent.dpr)))
+  throw std::invalid_argument("frame context epoch retired/backwards or changed without new generation");
+ core_->highWater=generation;
  core_->generation=generation;core_->viewport=extent;
 }
 void ReadbackAdapter::consumeImage(OwnedFrame frame) {

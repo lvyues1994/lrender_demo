@@ -118,3 +118,22 @@ TEST_CASE("presentation/qimage-row-order-and-all-four-channels") {
  auto copy=ReadbackAdapter::copyImage(image);image.pixels.clear();
  CHECK(copy.pixelColor(0,0)==QColor(0x44,0x33,0x22,0x11));CHECK(copy.pixelColor(0,1)==QColor(0x88,0x77,0x66,0x55));
 }
+
+TEST_CASE("presentation/p6-drain-failure-cannot-prepare-before-retry") {
+ FakePresentation a;a.preparePath(PresentationPath::Readback,{},[](auto){});a.complete();tick();
+ a.beginDrain([](auto){});a.complete(RenderError{ErrorStage::Shutdown,true,"drain failed","held work"});tick();
+ bool rejected=false;a.preparePath(PresentationPath::Readback,{},[&](auto r){rejected=std::holds_alternative<RenderError>(r);});tick();
+ CHECK(rejected);CHECK(a.stages()==std::vector<std::string>{"prepare","drain"});
+ a.beginDrain([](auto){});a.complete();tick();a.releasePath([](auto){});a.complete();tick();
+}
+TEST_CASE("presentation/p6-frame-context-cannot-go-back-or-reuse-retired-epoch") {
+ ReadbackAdapter a({});prepare(a);
+ CHECK_THROWS_AS(a.setFrameContext(3,{{2,1},{2,1},1}),std::invalid_argument);
+ CHECK_NOTHROW(a.setFrameContext(4,{{2,1},{2,1},1}));
+ CHECK_THROWS_AS(a.setFrameContext(4,{{3,1},{3,1},1}),std::invalid_argument);
+ a.beginDrain([](auto){});tick();a.releasePath([](auto){});tick();
+ bool done=false;a.preparePath(PresentationPath::Readback,{},[&](auto){done=true;});tick();REQUIRE(done);
+ tc::DeviceInfo info{};a.probe(info,[](auto){});tick();
+ CHECK_THROWS_AS(a.setFrameContext(4,{{2,1},{2,1},1}),std::invalid_argument);
+ CHECK_NOTHROW(a.setFrameContext(5,{{2,1},{2,1},1}));
+}
