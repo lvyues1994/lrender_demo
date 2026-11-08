@@ -231,3 +231,119 @@ TEST_CASE("state/captured-immutable-snapshot-may-be-read-on-worker") {
     CHECK(result.get() == "captured");
     CHECK(state.snapshot()->model->value == "later");
 }
+
+
+TEST_CASE("state/fix-hidden-ready-is-rejected-and-show-can-revalidate") {
+    for (bool recovering : {false, true}) {
+        INFO("recovering=", recovering);
+        SessionState state; state.setViewport(extent()); state.start();
+        if (recovering) {
+            REQUIRE(state.presentationReady(state.snapshot()->generation, PresentationPath::VulkanShared));
+            state.presentationInvalidated({ErrorStage::Surface, true, "lost", "event"});
+        }
+        auto generation = state.snapshot()->generation;
+        state.setVisible(false);
+        auto before = state.snapshot();
+        CHECK_FALSE(state.presentationReady(generation, PresentationPath::VulkanShared, "hidden", "hidden"));
+        CHECK(state.snapshot()->life == before->life);
+        CHECK(state.snapshot()->backend == before->backend);
+        CHECK(state.snapshot()->device == before->device);
+        CHECK_FALSE(state.canSubmit());
+        state.setVisible(true);
+        CHECK_FALSE(state.canSubmit());
+        // Explicit post-show confirmation of the still-current initialization/recovery
+        // may succeed: rejecting a hidden callback must not permanently strand init.
+        REQUIRE(state.presentationReady(state.snapshot()->generation, PresentationPath::VulkanShared, "vulkan", "shown"));
+        CHECK(state.canSubmit());
+        CHECK(state.snapshot()->device == "shown");
+    }
+}
+TEST_CASE("state/fix-invalid-camera-is-atomic") {
+    auto const nan = std::numeric_limits<float>::quiet_NaN();
+    auto const inf = std::numeric_limits<float>::infinity();
+    std::vector<CameraState> invalid;
+    for (auto member : {&lr::core::CameraDesc::position, &lr::core::CameraDesc::target, &lr::core::CameraDesc::up})
+        for (int axis = 0; axis != 3; ++axis)
+            for (float value : {nan, inf, -inf}) {
+                CameraState camera; (camera.camera.*member)[axis] = value; invalid.push_back(camera);
+            }
+    for (auto member : {&lr::core::CameraDesc::verticalFov, &lr::core::CameraDesc::nearPlane, &lr::core::CameraDesc::farPlane})
+        for (float value : {nan, inf, -inf}) {
+            CameraState camera; camera.camera.*member = value; invalid.push_back(camera);
+        }
+    for (float fov : {0.0f, -0.1f, lr::core::kPi, 2 * lr::core::kPi, std::numeric_limits<float>::denorm_min()}) {
+        CameraState camera; camera.camera.verticalFov = fov; invalid.push_back(camera);
+    }
+    for (float near : {0.0f, -1.0f, 500.0f, 501.0f}) {
+        CameraState camera; camera.camera.nearPlane = near; invalid.push_back(camera);
+    }
+    for (float far : {-1.0f, 0.0f, 0.05f}) {
+        CameraState camera; camera.camera.farPlane = far; invalid.push_back(camera);
+    }
+    CameraState coincident; coincident.camera.target = coincident.camera.position; invalid.push_back(coincident);
+    for (auto up : {lr::core::vec3{0}, lr::core::vec3{0,0,1}, lr::core::vec3{0,0,-1}}) {
+        CameraState camera; camera.camera.up = up; invalid.push_back(camera);
+    }
+    CameraState overflow; overflow.camera.nearPlane = std::numeric_limits<float>::max()/2;
+    overflow.camera.farPlane = std::numeric_limits<float>::max(); invalid.push_back(overflow);
+    for (std::size_t i = 0; i != invalid.size(); ++i) {
+        INFO("invalid camera case ", i);
+        SessionState state; ready(state); state.acknowledgeHistoryReset();
+        auto before = state.snapshot();
+        CHECK_THROWS_AS(state.setCamera(invalid[i]), std::invalid_argument);
+        auto after = state.snapshot();
+        for (auto member : {&lr::core::CameraDesc::position, &lr::core::CameraDesc::target, &lr::core::CameraDesc::up})
+            for (int axis = 0; axis != 3; ++axis)
+                CHECK((after->camera.camera.*member)[axis] == (before->camera.camera.*member)[axis]);
+        CHECK(after->camera.camera.verticalFov == before->camera.camera.verticalFov);
+        CHECK(after->camera.camera.nearPlane == before->camera.camera.nearPlane);
+        CHECK(after->camera.camera.farPlane == before->camera.camera.farPlane);
+        CHECK(after->generation == before->generation);
+        CHECK(after->life == before->life);
+        CHECK_FALSE(state.historyResetPending()); CHECK(state.canSubmit());
+    }
+}
+TEST_CASE("state/fix-invalid-exposure-is-atomic-even-with-pipeline-and-taa-change") {
+    for (float exposure : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+                           -std::numeric_limits<float>::infinity(), 0.0f, -1.0f}) {
+        SessionState state; ready(state); state.acknowledgeHistoryReset(); auto before = state.snapshot();
+        RenderOptions bad; bad.pipeline = PipelineKind::Pathtrace; bad.taa = true; bad.exposure = exposure;
+        CHECK_THROWS_AS(state.setRenderOptions(bad), std::invalid_argument);
+        auto after = state.snapshot();
+        CHECK(after->options.pipeline == before->options.pipeline);
+        CHECK(after->options.taa == before->options.taa);
+        CHECK(after->options.exposure == before->options.exposure);
+        CHECK(after->generation == before->generation); CHECK(after->life == before->life);
+        CHECK_FALSE(state.historyResetPending()); CHECK(state.canSubmit());
+    }
+}
+TEST_CASE("state/fix-valid-camera-and-exposure-have-no-ui-preference-caps") {
+    SessionState state; ready(state);
+    CameraState camera; camera.camera.up = lr::core::vec3{0,3,1}; // nonunit/nonorthogonal is a valid lookAt hint
+    camera.camera.verticalFov = 3.14f; camera.camera.farPlane = 1e20f;
+    CHECK_NOTHROW(state.setCamera(camera));
+    CHECK(state.snapshot()->camera.camera.farPlane == 1e20f);
+    RenderOptions options; options.exposure = std::numeric_limits<float>::max();
+    CHECK_NOTHROW(state.setRenderOptions(options));
+    options.exposure = std::numeric_limits<float>::min();
+    CHECK_NOTHROW(state.setRenderOptions(options));
+    CHECK(state.snapshot()->options.exposure == options.exposure);
+}
+TEST_CASE("state/fix-preparing-logical-only-viewport-change-retires-ready") {
+    SessionState state; state.setViewport(extent()); state.start(); auto generation = state.snapshot()->generation;
+    auto changed = state.viewport(); ++changed.logical.x; state.setViewport(changed);
+    CHECK(state.snapshot()->life == LifeState::Preparing);
+    CHECK(state.snapshot()->generation == generation + 1);
+    CHECK(state.viewport().physical.x == 100); CHECK(state.viewport().dpr == 1);
+    CHECK_FALSE(state.presentationReady(generation, PresentationPath::VulkanShared));
+    CHECK_FALSE(state.canSubmit());
+    REQUIRE(state.presentationReady(state.snapshot()->generation, PresentationPath::VulkanShared));
+    CHECK(state.canSubmit());
+}
+TEST_CASE("state/fix-recovering-and-failed-reject-current-epoch-frames-too") {
+    SessionState state; ready(state);
+    state.presentationInvalidated({ErrorStage::Surface, true, "lost", "event"});
+    CHECK_FALSE(state.acceptsFrame(stamp(state)));
+    state.fail({ErrorStage::Submit, false, "fatal", "cause"});
+    CHECK_FALSE(state.acceptsFrame(stamp(state)));
+}

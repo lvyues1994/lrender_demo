@@ -12,6 +12,9 @@ public:
     SessionState &operator=(SessionState const &) = delete;
     void start();
     void selectModel(ModelId model);
+    // Invalid numeric inputs throw invalid_argument before state/history/epoch changes.
+    // Finite float-representable lookAt/projection: distinct eye/target, nonparallel
+    // nonzero up, 0<FOV<pi radians, 0<near<far; exposure is finite and positive.
     void setCamera(CameraState camera);
     void setRenderOptions(RenderOptions options);
     void setViewport(ViewportExtent viewport);
@@ -26,6 +29,9 @@ public:
     void presentationInvalidated(RenderError error);
     // Caller must have actually drained/rebound resources before signaling readiness.
     // This epoch check is not a substitute for adapter lifetime/flush ordering.
+    // Hidden-host readiness is rejected without mutation. On show the owner must
+    // revalidate actual resources and signal readiness again for the current epoch;
+    // merely showing never reuses a confirmation delivered while hidden.
     // Empty backend/device values preserve known metadata during a target rebind.
     bool presentationReady(SessionGeneration generation, PresentationPath path,
                            std::string backend = {}, std::string device = {});

@@ -10,6 +10,33 @@ bool sameViewport(ViewportExtent const &a, ViewportExtent const &b) {
 bool sameVector(lr::core::vec3 const &a, lr::core::vec3 const &b) {
     return a.x == b.x && a.y == b.y && a.z == b.z;
 }
+bool finiteVector(lr::core::vec3 const &v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+bool finiteMatrix(lr::core::mat4 const &matrix) {
+    for (int column = 0; column != 4; ++column)
+        for (int row = 0; row != 4; ++row)
+            if (!std::isfinite(matrix[column][row])) return false;
+    return true;
+}
+bool validCamera(lr::core::CameraDesc const &camera) {
+    // Scene.h specifies radians. Math.cpp uses normalize(target-position),
+    // normalize(cross(forward,up)), tan(fov/2), and finite near/far products.
+    // No orbit radius/pole epsilon, unit-up requirement or UI preference caps.
+    if (!finiteVector(camera.position) || !finiteVector(camera.target) || !finiteVector(camera.up) ||
+        !std::isfinite(camera.verticalFov) || camera.verticalFov <= 0 || camera.verticalFov >= std::acos(-1.0) ||
+        !std::isfinite(camera.nearPlane) || !std::isfinite(camera.farPlane) ||
+        camera.nearPlane <= 0 || camera.farPlane <= camera.nearPlane) return false;
+    auto const forward = camera.target - camera.position;
+    auto const forwardLength2 = tc::dot(forward, forward);
+    if (!std::isfinite(forwardLength2) || forwardLength2 <= 0) return false;
+    auto const side = tc::cross(tc::normalize(forward), camera.up);
+    auto const sideLength2 = tc::dot(side, side);
+    if (!std::isfinite(sideLength2) || sideLength2 <= 0) return false;
+    // Check actual float math, not guessed scene-scale limits. Aspect belongs to
+    // the viewport; unit aspect verifies the camera's own projection coefficients.
+    return finiteMatrix(lr::core::viewMatrix(camera)) && finiteMatrix(lr::core::projectionMatrix(camera, 1.0f));
+}
 bool sameCamera(CameraState const &a, CameraState const &b) {
     return sameVector(a.camera.position, b.camera.position) && sameVector(a.camera.target, b.camera.target) &&
            sameVector(a.camera.up, b.camera.up) && a.camera.verticalFov == b.camera.verticalFov &&
@@ -53,13 +80,18 @@ void SessionState::selectModel(ModelId model) {
 }
 void SessionState::setCamera(CameraState camera) {
     requireOwner();
-    if (!acceptsCommands() || sameCamera(state_.camera, camera)) return;
+    if (!acceptsCommands()) return;
+    if (!validCamera(camera.camera))
+        throw std::invalid_argument("Camera must have finite representable lookAt/projection, 0<FOV<pi, 0<near<far");
+    if (sameCamera(state_.camera, camera)) return;
     state_.camera = camera;
     resetHistory_ = true; // cameraCut/reference-history policy consumed later by session, not a target epoch
 }
 void SessionState::setRenderOptions(RenderOptions options) {
     requireOwner();
     if (!acceptsCommands()) return;
+    if (!std::isfinite(options.exposure) || options.exposure <= 0)
+        throw std::invalid_argument("Exposure must be finite and positive");
     if (state_.options.pipeline != options.pipeline || state_.options.taa != options.taa) resetHistory_ = true;
     state_.options = options; // latest absolute values coalesce; exposure alone keeps linear history
 }
@@ -121,7 +153,7 @@ void SessionState::presentationInvalidated(RenderError error) {
 bool SessionState::presentationReady(SessionGeneration generation, PresentationPath path,
                                      std::string backend, std::string device) {
     requireOwner();
-    if (!acceptsCommands() || state_.life == LifeState::Idle || presentationValid_ ||
+    if (!acceptsCommands() || !visible_ || state_.life == LifeState::Idle || presentationValid_ ||
         generation == 0 || generation != state_.generation) return false;
     presentationValid_ = true;
     state_.path = path;
