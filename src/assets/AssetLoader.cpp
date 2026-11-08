@@ -14,6 +14,21 @@ struct AssetLoader::Impl : QObject, std::enable_shared_from_this<Impl> {
   AppToken root;
   Decode decode;
   std::size_t count = 0;
+  std::function<void()> idle;
+  bool idleQueued = false;
+  void notifyIdle() {
+    if (idleQueued)
+      return;
+    idleQueued = true;
+    auto self = shared_from_this();
+    QTimer::singleShot(0, this, [self] {
+      self->idleQueued = false;
+      if (!self->count && self->idle) {
+        auto callback = self->idle;
+        callback();
+      }
+    });
+  }
   std::unique_ptr<lqtexec::ObjectScope> completion;
   struct Request {
     AssetRequestId id;
@@ -52,6 +67,8 @@ struct AssetLoader::Impl : QObject, std::enable_shared_from_this<Impl> {
                            qWarning("AssetLoader observer threw");
                          }
                          --self->count;
+                         if (!self->count)
+                           self->notifyIdle();
                        });
   }
 };
@@ -59,14 +76,24 @@ AssetLoader::AssetLoader(QThreadPool *p, lqtexec::EventLoopScheduler gui,
                          AppToken root, Decode decode)
     : impl_(std::make_shared<Impl>(p, gui, root, std::move(decode))) {}
 AssetLoader::~AssetLoader() {
-  impl_->owner();
-  if (impl_->count)
-    qWarning("AssetLoader destroyed with active tasks: application pool/scope "
-             "must remain alive");
+  if (QThread::currentThread() != impl_->thread() || impl_->count)
+    qFatal("AssetLoader lifetime violation: GUI owner and idle receipts "
+           "required before destruction");
 }
 std::size_t AssetLoader::inFlight() const {
   impl_->owner();
   return impl_->count;
+}
+void AssetLoader::assertIdle() const {
+  impl_->owner();
+  if (impl_->count)
+    throw std::logic_error("AssetLoader still has producer receipts");
+}
+void AssetLoader::setIdleHandler(std::function<void()> callback) {
+  impl_->owner();
+  impl_->idle = std::move(callback);
+  if (!impl_->count)
+    impl_->notifyIdle();
 }
 LoadTicket AssetLoader::beginLoad(AssetEntry entry, AssetRequestId request,
                                   std::function<void(LoadOutcome)> done) {

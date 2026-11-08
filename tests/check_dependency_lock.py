@@ -61,5 +61,43 @@ class DependencyLockTest(unittest.TestCase):
         self.record["path"] = "../outside"
         self.rejected("Unsafe dependency path")
 
+    def test_escaping_symlink_rejected(self):
+        with tempfile.TemporaryDirectory() as outside:
+            (self.root / "escape").symlink_to(outside, target_is_directory=True)
+            self.record["path"] = "escape"
+            self.rejected("Unsafe dependency path")
+
+    def configure(self):
+        self.lock.write_text(json.dumps({"records": [self.record]}))
+        source = self.root / "project"
+        source.mkdir(exist_ok=True)
+        guard = VERIFIER.with_name("DependencyGuard.cmake")
+        (source / "CMakeLists.txt").write_text(
+            'cmake_minimum_required(VERSION 3.25)\nproject(guard NONE)\n'
+            f'set(DEMO_DEPENDENCY_ROOT "{self.root}")\n'
+            f'set(DEMO_DEPENDENCY_LOCK "{self.lock}")\n'
+            f'include("{VERIFIER}")\ninclude("{guard}")\n')
+        return subprocess.run(["cmake", "-S", str(source), "-B", str(self.root / "build")], capture_output=True, text=True)
+
+    def test_configure_wrong_sha(self):
+        self.record["sha"] = "0" * 40
+        result = self.configure()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SHA mismatch", result.stdout + result.stderr)
+
+    def test_configure_missing_dependency(self):
+        self.record["path"] = "missing"
+        result = self.configure()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing dependency directory", result.stdout + result.stderr)
+
+    def test_cached_build_rechecks_dirty_dependency(self):
+        result = self.configure()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (self.repo / "source.txt").write_text("changed after configure\n")
+        result = subprocess.run(["cmake", "--build", str(self.root / "build")], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Dirty dependency", result.stdout + result.stderr)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

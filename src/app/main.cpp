@@ -1,4 +1,8 @@
+#include "app/ApplicationLifetime.h"
 #include "assets/AssetLoader.h"
+#ifdef DEMO_E2E
+#include "e2e_scenarios.h"
+#endif
 #include "assets/AssetRoot.h"
 #include "presentation/VulkanSharedAdapter.h"
 #include "render/RenderSession.h"
@@ -16,8 +20,11 @@
 #include <QScreen>
 #include <QTimer>
 #include <QWindow>
+#include <atomic>
+#include <condition_variable>
 #include <iostream>
 #include <lqtexec/EventLoopContext.h>
+#include <mutex>
 #include <optional>
 namespace demo {
 struct Bootstrap {
@@ -35,7 +42,29 @@ struct Viewer : QObject {
   std::unique_ptr<RenderSession> session;
   VulkanSharedAdapter *presentation = nullptr;
   std::string backend, mode, model, test, screenshot;
-  bool loading = true, closing = false, finishing = false;
+  bool loading = true, closing = false, sessionStopped = false,
+       desiredCloseObserved = false;
+  std::unique_ptr<ApplicationLifetime> lifetime;
+#ifdef DEMO_E2E
+  E2eScenario scenario;
+  bool injectZeroShared = false;
+#endif
+  QTimer waiting;
+  struct DecodeGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::atomic<bool> entered{false};
+    bool open = false;
+    void release() {
+      std::lock_guard<std::mutex> lock(mutex);
+      open = true;
+      cv.notify_all();
+    }
+  } decodeGate;
+  std::optional<LoadTicket> extraLoad;
+  std::uint64_t releaseDecodeAt = 0;
+  std::atomic<unsigned> decodeCheckpoints{0};
+
   int code = 0, stage = 0;
   std::uint64_t beats = 0, lastCompleted = 0, stopBeats = 0;
   qint64 previousBeat = 0, maxGuiGap = 0;
@@ -52,23 +81,25 @@ struct Viewer : QObject {
     using receiver_concept = lexec::receiver_t;
     Viewer *owner;
     void set_value() && noexcept {
-      QTimer::singleShot(0, &owner->app, [v = owner] {
-        std::cout << "viewer stopped GUI heartbeats=" << v->beats << " elapsedMs=" << v->elapsed.elapsed()
-                  << std::endl;
-        v->app.exit(v->code);
-      });
+      QTimer::singleShot(0, &owner->app, [v = owner] { v->rootJoined(); });
     }
   };
-  using Join = lexec::connect_result_t<decltype(std::declval<lexec::counting_scope &>().join()), Joined>;
+  using Join = lexec::connect_result_t<
+      decltype(std::declval<lexec::counting_scope &>().join()), Joined>;
   std::unique_ptr<Join> joined;
-  Viewer(QApplication &a, std::string b, std::string p, std::string m, std::string t, std::string shot,
-         std::filesystem::path assetRoot)
+  Viewer(QApplication &a, std::string b, std::string p, std::string m,
+         std::string t, std::string shot, std::filesystem::path assetRoot)
       : app(a), backend(b), mode(p), model(m), test(t), screenshot(shot) {
     pool.setMaxThreadCount(2);
     elapsed.start();
     heartbeat.setInterval(2);
     connect(&heartbeat, &QTimer::timeout, this, [this] {
       ++beats;
+      if (releaseDecodeAt && beats >= releaseDecodeAt) {
+        releaseDecodeAt = 0;
+        decodeGate.release();
+      }
+
       auto now = elapsed.elapsed();
       maxGuiGap = std::max(maxGuiGap, now - previousBeat);
       previousBeat = now;
@@ -118,13 +149,149 @@ struct Viewer : QObject {
     if (!test.empty())
       window->viewport().setFixedSize(160, 120);
     window->show();
-    loader = std::make_unique<AssetLoader>(&pool, gui.get_scheduler(), root.get_token(),
-                                           [assetRoot](auto const &entry, auto stop) {
-                                             return decodeAssetAtRoot(entry, assetRoot, std::move(stop));
-                                           });
+    loader = std::make_unique<AssetLoader>(
+        &pool, gui.get_scheduler(), root.get_token(),
+        [assetRoot, this](auto const &entry, auto stop) {
+          if (test == "injected-load-fault")
+            throw std::runtime_error(
+                "injected decode failure (not missing original resource)");
+          if (test == "close-late-loader") {
+            std::unique_lock<std::mutex> lock(decodeGate.mutex);
+            decodeGate.entered = true;
+            if (!decodeGate.cv.wait_for(lock, std::chrono::seconds(5),
+                                        [this] { return decodeGate.open; }))
+              return Result<CpuAssetPtr>{RenderError{
+                  ErrorStage::Load, false, "decode test gate timeout",
+                  "bounded fixture, not forced cancellation"}};
+          }
+          if (test == "close-decode") {
+            auto checkpoint = [this, stop] {
+              if (++decodeCheckpoints == 8) {
+                std::unique_lock<std::mutex> lock(decodeGate.mutex);
+                decodeGate.entered = true;
+                if (!decodeGate.cv.wait_for(lock, std::chrono::seconds(5),
+                                            [this] { return decodeGate.open; }))
+                  throw std::runtime_error(
+                      "actual parser checkpoint gate timeout");
+                std::cout << "actual CPU read/parse checkpoint="
+                          << decodeCheckpoints.load() << " cancelled=" << stop()
+                          << std::endl;
+              }
+              return stop();
+            };
+            return decodeAssetAtRoot(entry, assetRoot, checkpoint);
+          }
+          return decodeAssetAtRoot(entry, assetRoot, std::move(stop));
+        });
+    lifetime =
+        std::make_unique<ApplicationLifetime>(ApplicationLifetime::Hooks{
+            [this] {
+              closing = true;
+              script.stop();
+              stopBeats = beats;
+              if (!waiting.isActive())
+                waiting.start();
+              if (extraLoad)
+                extraLoad->cancel();
+              if (test == "close-decode")
+                releaseDecodeAt = beats + 5;
+              if (session)
+                session->requestStop();
+            },
+            [this] {
+              if (session) {
+                auto s = session->snapshot();
+                if (s->life != LifeState::Stopped)
+                  qFatal("Session retirement before onStopped");
+                std::cout << "final completed=" << s->performance.completed
+                          << " shown=" << s->performance.displayed
+                          << " sharedShown=" << s->performance.sharedShown
+                          << " inFlight=" << s->performance.inFlight
+                          << std::endl;
+                if (test.rfind("close-", 0) == 0 && !desiredCloseObserved) {
+                  code = 1;
+                  std::cerr << "requested close phase was NOT observed"
+                            << std::endl;
+                }
+#ifdef DEMO_E2E
+                if (test.rfind("e2e-", 0) == 0 && !scenario.passed) {
+                  code = 1;
+                  std::cerr << "e2e receipt/scenario goal NOT reached"
+                            << std::endl;
+                }
+#endif
+                if (test == "close-decode" && decodeCheckpoints.load() < 8) {
+                  code = 1;
+                  std::cerr
+                      << "decode closure did not reach actual parser checkpoint"
+                      << std::endl;
+                }
+                auto observedShared = s->performance.sharedShown;
+                bool required = mode == "shared" &&
+                                (test == "full" || test.rfind("e2e-", 0) == 0);
+#ifdef DEMO_E2E
+                if (injectZeroShared) {
+                  required = true;
+                  observedShared = 0;
+                  std::cerr << "injected acceptance sharedShown=0 actual="
+                            << s->performance.sharedShown << std::endl;
+                }
+#endif
+                if (!ApplicationLifetime::acceptsSharedEvidence(
+                        required, observedShared)) {
+                  code = 1;
+                  std::cerr << "strict shared acceptance failed: zero observed "
+                               "sharedShown"
+                            << std::endl;
+                }
+                window->showSnapshot(s);
+                session.reset();
+                presentation = nullptr;
+              }
+              std::cout << "GUI cleanup ticks=" << beats - stopBeats
+                        << " maxGapMs=" << maxGuiGap << std::endl;
+              if (maxGuiGap > 500)
+                code = 1;
+            },
+            [this] {
+              if (loader) {
+                loader->assertIdle();
+                loader->setIdleHandler({});
+                loader.reset();
+              }
+            },
+            [this] {
+              statistics.stop();
+              auto s = std::make_shared<SessionSnapshot>();
+              s->life = LifeState::Stopped;
+              window->showSnapshot(s);
+              window->close();
+            },
+            [this] {
+              applicationScope.reset();
+              root.close();
+              joined = std::unique_ptr<Join>(
+                  new Join(lexec::connect(root.join(), Joined{this})));
+              lexec::start(*joined);
+            },
+            [] {}});
+    lifetime->start();
+    loader->setIdleHandler([this] {
+      lifetime->onShutdownProgress(loading, sessionStopped, loader->inFlight());
+    });
+    waiting.setInterval(1000);
+    connect(&waiting, &QTimer::timeout, this, [this] {
+      std::cerr << "shutdown waiting: sessionStopped=" << sessionStopped
+                << " bootstrap=" << loading
+                << " loads=" << (loader ? loader->inFlight() : 0)
+                << " GUI heartbeats=" << beats
+                << " (resources retained; no forced GPU destruction)"
+                << std::endl;
+    });
     std::cout << "asset root=" << assetRoot << std::endl;
     auto box = std::make_shared<Bootstrap>();
-    auto work = lexec::schedule(lqtexec::ThreadPoolScheduler{&pool}) | lexec::then([box, b]() noexcept {
+    auto work = lexec::schedule(lqtexec::ThreadPoolScheduler{&pool}) |
+                lexec::then([box, b]() noexcept {
                   try {
                     lr::runtime::RuntimeConfig config;
                     config.framePoolThreads = 2;
@@ -135,7 +302,8 @@ struct Viewer : QObject {
                     renderer.backend = b;
                     renderer.runtime = box->runtime.get();
                     renderer.framesInFlight = 2;
-                    renderer.textureConversions = lr::render::ConversionDelivery::Deterministic;
+                    renderer.textureConversions =
+                        lr::render::ConversionDelivery::Deterministic;
                     // Known catalog: <=6 bound images at <=2048 squared. 128MiB
                     // fits the whole bounded batch; extra frame settles
                     // conversions.
@@ -147,35 +315,43 @@ struct Viewer : QObject {
                     box->runtime.reset();
                   }
                 });
-    lexec::spawn(lqtexec::then_on(std::move(work), *completionScope(),
-                                  [this, box]() noexcept {
-                                    try {
-                                      initialized(box);
-                                    } catch (std::exception const &e) {
-                                      std::cerr << "startup failed " << e.what() << std::endl;
-                                      code = 1;
-                                      auto retire = lexec::schedule(lqtexec::ThreadPoolScheduler{&pool}) |
-                                                    lexec::then([box]() noexcept {
-                                                      box->renderer.reset();
-                                                      box->runtime.reset();
-                                                    });
-                                      lexec::spawn(lqtexec::then_on(std::move(retire), *completionScope(),
-                                                                    [this]() noexcept { requestStop(); }),
-                                                   root.get_token());
-                                    }
-                                  }),
-                 root.get_token());
+    lexec::spawn(
+        lqtexec::then_on(
+            std::move(work), *completionScope(),
+            [this, box]() noexcept {
+              try {
+                initialized(box);
+              } catch (std::exception const &e) {
+                std::cerr << "startup failed " << e.what() << std::endl;
+                code = 1;
+                auto retire =
+                    lexec::schedule(lqtexec::ThreadPoolScheduler{&pool}) |
+                    lexec::then([box]() noexcept {
+                      box->renderer.reset();
+                      box->runtime.reset();
+                    });
+                lexec::spawn(lqtexec::then_on(std::move(retire),
+                                              *completionScope(),
+                                              [this]() noexcept {
+                                                loading = false;
+                                                requestStop();
+                                              }),
+                             root.get_token());
+              }
+            }),
+        root.get_token());
     statistics.setInterval(500);
     connect(&statistics, &QTimer::timeout, this, [this] {
-      if (session && window)
+      if (!closing && session && window)
         window->showSnapshot(session->snapshot());
     });
     statistics.start();
     script.setInterval(20);
     connect(&script, &QTimer::timeout, this, [this] {
-      if (elapsed.elapsed() > 45000) {
+      if (elapsed.elapsed() > (test.rfind("e2e-", 0) == 0 ? 120000 : 45000)) {
         std::cerr << "deadline state=" << stage << " closing=" << closing
-                  << " (resources retained; external test deadline required)" << std::endl;
+                  << " (resources retained; external test deadline required)"
+                  << std::endl;
         code = 1;
         requestStop();
         script.stop();
@@ -196,7 +372,8 @@ struct Viewer : QObject {
   std::unique_ptr<lqtexec::ObjectScope> applicationScope;
   lqtexec::ObjectScope *completionScope() {
     if (!applicationScope)
-      applicationScope = std::make_unique<lqtexec::ObjectScope>(this, gui.get_scheduler(), root.get_token());
+      applicationScope = std::make_unique<lqtexec::ObjectScope>(
+          this, gui.get_scheduler(), root.get_token());
     return applicationScope.get();
   }
   void initialized(std::shared_ptr<Bootstrap> box) {
@@ -205,7 +382,8 @@ struct Viewer : QObject {
       try {
         std::rethrow_exception(box->error);
       } catch (std::exception const &e) {
-        std::cerr << "renderer initialization failed: " << e.what() << std::endl;
+        std::cerr << "renderer initialization failed: " << e.what()
+                  << std::endl;
       }
       code = 1;
       finish();
@@ -213,7 +391,8 @@ struct Viewer : QObject {
     }
     auto world = lr::scene::makeWorld({});
     world->setEnvironment({lr::core::vec3{.25f}});
-    auto sun = world->createEntity(lr::core::Transform::identity(), std::nullopt);
+    auto sun =
+        world->createEntity(lr::core::Transform::identity(), std::nullopt);
     lr::core::DirectionalLight light;
     light.direction = {-.5f, -1, -1};
     light.illuminance = 2;
@@ -224,14 +403,31 @@ struct Viewer : QObject {
                                   window->viewport().showFrame(std::move(f));
                               },
                               [this](RenderError e) {
-                                std::cerr << "presentation error: " << e.message << ": " << e.cause
-                                          << std::endl;
+                                std::cerr << "presentation error: " << e.message
+                                          << ": " << e.cause << std::endl;
                               }};
-    auto adapter = std::make_unique<VulkanSharedAdapter>(
+    auto sharedAdapter = std::make_unique<VulkanSharedAdapter>(
         info, gui.get_scheduler(), root.get_token(),
         [this] { return window->viewport().createNativeLease(); },
         [this] { window->viewport().retireNative(); }, images);
-    presentation = adapter.get();
+    presentation = sharedAdapter.get();
+    std::unique_ptr<PresentationAdapter> adapter = std::move(sharedAdapter);
+    if (test == "injected-present-fault") {
+      presentation = nullptr;
+      adapter = std::make_unique<ReadbackAdapter>(images, [](std::string stage,
+                                                             Done done) {
+        QTimer::singleShot(
+            0, QCoreApplication::instance(),
+            [stage, done = std::move(done)]() mutable {
+              if (stage == "prepare")
+                done(RenderError{ErrorStage::Surface, false,
+                                 "injected present boundary failure",
+                                 "simulated platform, not GPU device loss"});
+              else
+                done(std::monostate{});
+            });
+      });
+    }
     SessionEvents events;
     events.onSnapshot = [this](auto s) {
       if (s->warnings.size() > warningCount) {
@@ -243,90 +439,129 @@ struct Viewer : QObject {
       if (stage == 3 && s->generation >= cameraGeneration &&
           s->performance.sampleOneFrames > sampleOneAtCamera)
         sawSampleOne = true;
-      if (test == "close-install" && s->assetInstalling && s->installationParts > 0) {
-        std::cout << "close during installation parts=" << s->installationParts << std::endl;
+      if (test == "close-install" && s->assetInstalling &&
+          s->installationParts > 0) {
+        desiredCloseObserved = true;
+        std::cout << "close during installation parts=" << s->installationParts
+                  << std::endl;
+        requestStop();
+      }
+      if (test == "close-submit" && s->performance.inFlight > 0) {
+        desiredCloseObserved = true;
+        std::cout << "close actual submit inFlight=" << s->performance.inFlight
+                  << std::endl;
+        requestStop();
+      }
+      if (test == "close-prepare" && s->life == LifeState::Preparing) {
+        desiredCloseObserved = true;
+        std::cout << "close during prepare" << std::endl;
         requestStop();
       }
       if (test == "close-load" && s->assetLoadsInFlight > 0) {
-        std::cout << "close during actual load count=" << s->assetLoadsInFlight << std::endl;
+        desiredCloseObserved = true;
+        std::cout << "close during actual load count=" << s->assetLoadsInFlight
+                  << std::endl;
         requestStop();
       }
     };
     events.onError = [this](auto e) {
-      std::cerr << "session error: " << e.message << ": " << e.cause << std::endl;
-      if (session && session->snapshot()->life == LifeState::Failed) {
+      std::cerr << "session error: " << e.message << ": " << e.cause
+                << std::endl;
+      if ((test == "injected-load-fault") ||
+          (session && session->snapshot()->life == LifeState::Failed)) {
         code = 1;
         requestStop();
       }
     };
     events.onStopped = [this] { finish(); };
-    session = std::make_unique<RenderSession>(std::move(box->runtime), std::move(box->renderer),
-                                              std::move(world), std::move(adapter), SubmitFrame{}, events);
+    session = std::make_unique<RenderSession>(
+        std::move(box->runtime), std::move(box->renderer), std::move(world),
+        std::move(adapter),
+        test == "injected-submit-fault" ? SubmitFrame{[](auto, auto stamp,
+                                                         auto done) {
+          done({stamp,
+                RenderError{ErrorStage::Submit, false,
+                            "injected device/submit failure",
+                            "simulated terminal receipt, not hardware loss"}});
+          throw std::runtime_error(
+              "injected unknown-acceptance submit failure");
+        }}
+                                        : SubmitFrame{},
+        events);
     session->setAssetLoader(*loader);
-    session->setPresentationMode(
-        mode == "readback" ? PresentationPath::Readback : PresentationPath::VulkanShared, mode == "auto");
+    lifetime->onShutdownProgress(false, false, loader->inFlight());
+    session->setPresentationMode(mode == "readback"
+                                     ? PresentationPath::Readback
+                                     : PresentationPath::VulkanShared,
+                                 mode == "auto");
     CameraState camera;
     camera.camera.position = {0, 0, 3};
     session->setCamera(camera);
     auto &v = window->viewport();
     auto d = v.devicePixelRatioF();
-    session->setViewport({{v.width(), v.height()}, {qRound(v.width() * d), qRound(v.height() * d)}, d});
+    session->setViewport({{v.width(), v.height()},
+                          {qRound(v.width() * d), qRound(v.height() * d)},
+                          d});
     session->setVisible(v.isVisible());
     session->start();
-    session->selectModel({model});
-    std::cout << "viewer backend=" << info.backend << " device=" << info.deviceName << " DPR=" << d
+    if (test == "close-late-loader") {
+      extraLoad = loader->beginLoad(
+          std::get<AssetEntry>(AssetCatalog{}.describe({"floor"})), 999999,
+          [this](auto) {
+            std::cout << "late loader receipt GUI count=" << loader->inFlight()
+                      << std::endl;
+          });
+    } else
+      session->selectModel({model});
+    std::cout << "viewer backend=" << info.backend
+              << " device=" << info.deviceName << " DPR=" << d
               << " Qt=" << qVersion() << std::endl;
     if (closing)
       session->requestStop();
   }
-  void requestStop() {
-    if (closing)
+  void rootJoined() {
+    if (pool.activeThreadCount() != 0) {
+      std::cerr << "root joined; waiting for Qt pool runnable epilogue, active="
+                << pool.activeThreadCount() << std::endl;
+      QTimer::singleShot(10, this, [this] { rootJoined(); });
       return;
+    }
+    if (loader || session || applicationScope)
+      qFatal("root joined before application owners/scopes retired");
+    lifetime->onRootJoined();
+    waiting.stop();
+    std::cout << "lifetime assertions: SessionStopped=1 loaderIdle=1 "
+                 "rootJoined=1 poolActive=0 GUIContextAlive=1"
+              << std::endl;
+    std::cout << "viewer stopped GUI heartbeats=" << beats
+              << " elapsedMs=" << elapsed.elapsed() << std::endl;
+    app.exit(code);
+  }
+  ~Viewer() override {
+    if (lifetime)
+      try {
+        lifetime->assertSafeDestruction();
+      } catch (std::exception const &e) {
+        qFatal("Viewer lifetime violation: %s", e.what());
+      }
+  }
+  void requestStop() {
     closing = true;
-    stopBeats = beats;
-    script.stop();
-    if (session)
-      session->requestStop();
-    else if (!loading)
+    if (!waiting.isActive())
+      waiting.start();
+    lifetime->requestExit();
+    if (!session && !loading)
       finish();
   }
   void finish() {
-    if (finishing)
-      return;
-    finishing = true;
-    statistics.stop();
-    closing = true;
-    script.stop();
-    if (session) {
-      auto s = session->snapshot();
-      std::cout << "final completed=" << s->performance.completed << " shown=" << s->performance.displayed
-                << " sharedShown=" << s->performance.sharedShown << " inFlight=" << s->performance.inFlight
-                << std::endl;
-      auto stopped = std::make_shared<SessionSnapshot>(*s);
-      stopped->life = LifeState::Stopped;
-      window->showSnapshot(stopped);
-      session.reset();
-    }
-    std::cout << "GUI cleanup ticks=" << beats - stopBeats << " maxGapMs=" << maxGuiGap << std::endl;
-    if (maxGuiGap > 500)
-      code = 1;
-    presentation = nullptr;
-    if (loader && loader->inFlight() != 0) {
-      std::cerr << "ERROR loader still active at onStopped" << std::endl;
-      code = 1;
-      return;
-    }
-    loader.reset();
-    if (window) {
-      auto s = std::make_shared<SessionSnapshot>();
-      s->life = LifeState::Stopped;
-      window->showSnapshot(s);
-      window->close();
-    }
-    applicationScope.reset();
-    root.close();
-    joined = std::unique_ptr<Join>(new Join(lexec::connect(root.join(), Joined{this})));
-    lexec::start(*joined);
+    sessionStopped = true;
+    std::cout << "session onStopped loaderReceipts="
+              << (loader ? loader->inFlight() : 0) << std::endl;
+    if (test == "close-late-loader" && loader && loader->inFlight())
+      releaseDecodeAt = beats + 5;
+    lifetime->onShutdownProgress(loading, true,
+                                 loader ? loader->inFlight() : 0);
+    lifetime->requestExit();
   }
   void selfTest() {
     if (!session)
@@ -337,16 +572,72 @@ struct Viewer : QObject {
       requestStop();
       return;
     }
+#ifdef DEMO_E2E
+    if (test.rfind("e2e-", 0) == 0) {
+      if (scenario.tick(*session, *window)) {
+        if (!screenshot.empty()) {
+          window->grab().save(
+              QString::fromStdString(screenshot + "-widgets.png"));
+          if (auto native = window->viewport().nativeWindow())
+            native->screen()
+                ->grabWindow(native->winId())
+                .save(
+                    QString::fromStdString(screenshot + "-native-window.png"));
+          else
+            window->viewport().readbackImage().save(
+                QString::fromStdString(screenshot + "-readback.png"));
+        }
+        requestStop();
+      }
+      return;
+    }
+#endif
+    if ((test == "close-decode" || test == "close-late-loader") &&
+        decodeGate.entered.load()) {
+      desiredCloseObserved = true;
+      std::cout << "close with actual worker entered, loaderReceipts="
+                << loader->inFlight() << std::endl;
+      requestStop();
+      return;
+    }
     if (!s->installedModel)
       return;
     if (s->life != LifeState::Running && stage != 6 && stage != 7)
       return;
+    if (test == "close-drain" && stage == 0) {
+      desiredCloseObserved = true;
+      std::cout << "close after requesting actual drain; held-drain unit "
+                   "covers pending phase"
+                << std::endl;
+      stage = 1;
+      session->setViewport({{161, 121}, {161, 121}, 1});
+      requestStop();
+      return;
+    }
+    if (test == "close-native") {
+      desiredCloseObserved = true;
+      std::cout << "close on native invalidation" << std::endl;
+      if (auto native = window->viewport().nativeWindow()) {
+        QPlatformSurfaceEvent invalid(
+            QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed);
+        QApplication::sendEvent(native, &invalid);
+      } else
+        session->invalidatePresentation({ErrorStage::Surface, true,
+                                         "simulated native loss on readback",
+                                         "no real native surface on CPU"});
+      requestStop();
+      return;
+    }
+    if (test.rfind("close-", 0) == 0)
+      return; // wait for the requested event, never silently run full scenario
     auto completed = s->performance.completed;
     switch (stage) {
     case 0:
-      if (completed == 0 || (s->path == PresentationPath::VulkanShared && s->performance.sharedShown == 0))
+      if (completed == 0 || (s->path == PresentationPath::VulkanShared &&
+                             s->performance.sharedShown == 0))
         return;
-      std::cout << "installed=" << s->installedModel->value << " sharedShown=" << s->performance.sharedShown
+      std::cout << "installed=" << s->installedModel->value
+                << " sharedShown=" << s->performance.sharedShown
                 << " initial generation=" << s->generation << std::endl;
       lastCompleted = completed;
       if (auto spin = window->findChild<QDoubleSpinBox *>("ambient"))
@@ -354,9 +645,11 @@ struct Viewer : QObject {
       if (auto spin = window->findChild<QDoubleSpinBox *>("roughness"))
         spin->setValue(.65);
       {
-        QMouseEvent down(QEvent::MouseButtonPress, {20, 20}, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QMouseEvent down(QEvent::MouseButtonPress, {20, 20}, Qt::LeftButton,
+                         Qt::LeftButton, Qt::NoModifier);
         QApplication::sendEvent(&window->viewport(), &down);
-        QMouseEvent move(QEvent::MouseMove, {40, 30}, Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QMouseEvent move(QEvent::MouseMove, {40, 30}, Qt::NoButton,
+                         Qt::LeftButton, Qt::NoModifier);
         QApplication::sendEvent(&window->viewport(), &move);
       }
       stage = 1;
@@ -375,15 +668,17 @@ struct Viewer : QObject {
       stage = 2;
       return;
     case 12:
-      if (!capture || capture->wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+      if (!capture || capture->wait_for(std::chrono::seconds(0)) !=
+                          std::future_status::ready)
         return;
       {
         auto image = capture->get();
         capture.reset();
         if (!screenshot.empty())
-          ReadbackAdapter::copyImage(image).save(QString::fromStdString(screenshot + "-presented.png"));
-        std::cout << "stable actual presented capture=" << image.extent.x << "x" << image.extent.y
-                  << std::endl;
+          ReadbackAdapter::copyImage(image).save(
+              QString::fromStdString(screenshot + "-presented.png"));
+        std::cout << "stable actual presented capture=" << image.extent.x << "x"
+                  << image.extent.y << std::endl;
         if (model == "african_head" || model == "diablo" || model == "boggie") {
           normalPixels = image.pixels;
           capture.emplace(presentation->captureNext());
@@ -403,9 +698,12 @@ struct Viewer : QObject {
         auto c = s->camera;
         c.camera.position.x += .1f;
         cameraGeneration = s->generation;
-        cameraHost = window->viewport().nativeWindow() ? window->viewport().nativeWindow()->winId() : 0;
+        cameraHost = window->viewport().nativeWindow()
+                         ? window->viewport().nativeWindow()->winId()
+                         : 0;
         session->setCamera(c);
-        if(session->snapshot()->generation!=cameraGeneration)throw std::runtime_error("camera changed presentation generation");
+        if (session->snapshot()->generation != cameraGeneration)
+          throw std::runtime_error("camera changed presentation generation");
         sampleOneAtCamera = session->snapshot()->performance.sampleOneFrames;
         phase.restart();
       }
@@ -417,10 +715,13 @@ struct Viewer : QObject {
         return;
       if (s->generation != cameraGeneration ||
           (cameraHost &&
-           (!window->viewport().nativeWindow() || window->viewport().nativeWindow()->winId() != cameraHost)))
+           (!window->viewport().nativeWindow() ||
+            window->viewport().nativeWindow()->winId() != cameraHost)))
         throw std::runtime_error("PT camera unexpectedly rebuilt presentation");
-      std::cout << "PT camera reuse host=" << cameraHost << " generation=" << cameraGeneration << std::endl;
-      std::cout << "pathtrace camera sampleOne=" << sawSampleOne << " transitionMs=" << phase.elapsed()
+      std::cout << "PT camera reuse host=" << cameraHost
+                << " generation=" << cameraGeneration << std::endl;
+      std::cout << "pathtrace camera sampleOne=" << sawSampleOne
+                << " transitionMs=" << phase.elapsed()
                 << " completed=" << completed << std::endl;
       session->setRenderOptions({PipelineKind::Visibility, 1, true});
       lastCompleted = completed;
@@ -433,7 +734,9 @@ struct Viewer : QObject {
         auto c = s->camera;
         c.camera.position.x -= .1f;
         cameraGeneration = s->generation;
-        cameraHost = window->viewport().nativeWindow() ? window->viewport().nativeWindow()->winId() : 0;
+        cameraHost = window->viewport().nativeWindow()
+                         ? window->viewport().nativeWindow()->winId()
+                         : 0;
         session->setCamera(c);
       }
       lastCompleted = completed;
@@ -445,9 +748,12 @@ struct Viewer : QObject {
         return;
       if (s->generation != cameraGeneration ||
           (cameraHost &&
-           (!window->viewport().nativeWindow() || window->viewport().nativeWindow()->winId() != cameraHost)))
-        throw std::runtime_error("TAA camera unexpectedly rebuilt presentation");
-      std::cout << "TAA camera reuse host=" << cameraHost << " generation=" << cameraGeneration << std::endl;
+           (!window->viewport().nativeWindow() ||
+            window->viewport().nativeWindow()->winId() != cameraHost)))
+        throw std::runtime_error(
+            "TAA camera unexpectedly rebuilt presentation");
+      std::cout << "TAA camera reuse host=" << cameraHost
+                << " generation=" << cameraGeneration << std::endl;
       std::cout << "TAA camera transitionMs=" << phase.elapsed() << std::endl;
       session->setRenderOptions({PipelineKind::Visibility, 1, false});
       window->viewport().hide();
@@ -482,14 +788,17 @@ struct Viewer : QObject {
       stage = 8;
       return;
     case 8:
-      if (s->installedModel->value != "diablo" || !s->model || s->model->value != "diablo")
+      if (s->installedModel->value != "diablo" || !s->model ||
+          s->model->value != "diablo")
         return;
       lastCompleted = completed;
-      session->setCamera(s->camera); // force one bounded new receipt even if dirty work already settled
+      session->setCamera(s->camera); // force one bounded new receipt even if
+                                     // dirty work already settled
       stage = 13;
       return;
     case 13:
-      if (s->life != LifeState::Running || s->performance.inFlight || completed <= lastCompleted)
+      if (s->life != LifeState::Running || s->performance.inFlight ||
+          completed <= lastCompleted)
         return;
       if (s->path == PresentationPath::VulkanShared) {
         capture.emplace(presentation->captureNext());
@@ -500,17 +809,20 @@ struct Viewer : QObject {
       [[fallthrough]];
     case 14:
       if (capture) {
-        if (capture->wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        if (capture->wait_for(std::chrono::seconds(0)) !=
+            std::future_status::ready)
           return;
         auto image = capture->get();
         capture.reset();
         if (!screenshot.empty())
-          ReadbackAdapter::copyImage(image).save(QString::fromStdString(screenshot + "-latest-diablo.png"));
-        std::cout << "actual latest diablo presented capture=" << image.extent.x << "x" << image.extent.y
-                  << std::endl;
+          ReadbackAdapter::copyImage(image).save(
+              QString::fromStdString(screenshot + "-latest-diablo.png"));
+        std::cout << "actual latest diablo presented capture=" << image.extent.x
+                  << "x" << image.extent.y << std::endl;
       }
       if (!screenshot.empty()) {
-        window->grab().save(QString::fromStdString(screenshot + "-widgets.png"));
+        window->grab().save(
+            QString::fromStdString(screenshot + "-widgets.png"));
         // QWidget::grab excludes native children. Public Qt capture of this
         // application's own XID, not a desktop/browser automation surface.
         if (auto own = window->viewport().nativeWindow())
@@ -518,11 +830,15 @@ struct Viewer : QObject {
               ->grabWindow(own->winId())
               .save(QString::fromStdString(screenshot + "-native-window.png"));
       }
-      std::cout << "performance UI: " << window->findChild<QLabel *>("performance")->text().toStdString()
-                << std::endl;
+      std::cout
+          << "performance UI: "
+          << window->findChild<QLabel *>("performance")->text().toStdString()
+          << std::endl;
       std::cout << "scenario full latest installed=" << s->installedModel->value
-                << " sharedShown=" << s->performance.sharedShown << " GUI ticks=" << beats
-                << " DPR=" << window->viewport().devicePixelRatioF() << std::endl;
+                << " sharedShown=" << s->performance.sharedShown
+                << " GUI ticks=" << beats
+                << " DPR=" << window->viewport().devicePixelRatioF()
+                << std::endl;
       if (mode == "shared" && s->performance.sharedShown == 0)
         code = 1;
       if (s->path == PresentationPath::VulkanShared) {
@@ -531,7 +847,8 @@ struct Viewer : QObject {
           throw std::runtime_error("missing native window");
         cameraGeneration = s->generation;
         lastCompleted = completed;
-        QPlatformSurfaceEvent invalid(QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed);
+        QPlatformSurfaceEvent invalid(
+            QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed);
         QApplication::sendEvent(native, &invalid);
         stage = 10;
         return;
@@ -539,7 +856,8 @@ struct Viewer : QObject {
       requestStop();
       return;
     case 11:
-      if (!capture || capture->wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+      if (!capture || capture->wait_for(std::chrono::seconds(0)) !=
+                          std::future_status::ready)
         return;
       {
         auto image = capture->get();
@@ -549,12 +867,14 @@ struct Viewer : QObject {
         std::size_t changed = 0;
         for (std::size_t i = 0; i < normalPixels.size(); ++i)
           changed += image.pixels[i] != normalPixels[i];
-        std::cout << "actual normal-map on/off changedPixels=" << changed << " / " << normalPixels.size()
-                  << std::endl;
+        std::cout << "actual normal-map on/off changedPixels=" << changed
+                  << " / " << normalPixels.size() << std::endl;
         if (!changed)
-          throw std::runtime_error("normal-map shader had no observable effect");
+          throw std::runtime_error(
+              "normal-map shader had no observable effect");
         if (!screenshot.empty())
-          ReadbackAdapter::copyImage(image).save(QString::fromStdString(screenshot + "-normal-off.png"));
+          ReadbackAdapter::copyImage(image).save(
+              QString::fromStdString(screenshot + "-normal-off.png"));
         window->findChild<QCheckBox *>("normal")->setChecked(true);
       }
       window->viewport().setFixedSize(209, 145);
@@ -564,8 +884,8 @@ struct Viewer : QObject {
     case 10:
       if (s->generation <= cameraGeneration || completed <= lastCompleted)
         return;
-      std::cout << "Platform event invalidation rebuilt generation=" << s->generation
-                << " prior=" << cameraGeneration << std::endl;
+      std::cout << "Platform event invalidation rebuilt generation="
+                << s->generation << " prior=" << cameraGeneration << std::endl;
       requestStop();
       return;
     }
@@ -578,14 +898,44 @@ int main(int argc, char **argv) {
   app.setQuitOnLastWindowClosed(false);
   QCommandLineParser args;
   args.addHelpOption();
-  args.addOption({"backend", "Renderer backend (cpu only when explicit)", "backend", "vulkan"});
-  args.addOption({"presentation", "auto|shared|readback", "presentation", "auto"});
-  args.addOption({"asset-root", "TinyRenderer resource root (contains LICENSE.txt and obj)", "path"});
+  args.addOption({"backend", "Renderer backend (cpu only when explicit)",
+                  "backend", "vulkan"});
+  args.addOption(
+      {"presentation", "auto|shared|readback", "presentation", "auto"});
+  args.addOption({"asset-root",
+                  "TinyRenderer resource root (contains LICENSE.txt and obj)",
+                  "path"});
   args.addOption({"model", "Catalog model", "model", "african_head"});
-  args.addOption({"self-test", "P9 bounded interactions: full|close-load|close-install", "test"});
+  args.addOption({"self-test",
+                  "P9 bounded interactions: full|close-load|close-install",
+                  "test"});
   args.addOption({"screenshot", "Local PNG output prefix", "path"});
+#ifdef DEMO_E2E
+  args.addOption({"scenario", "cycle|resize|close-loading|fallback|faults",
+                  "scenario", "cycle"});
+  args.addOption({"frames", "Minimum receipts after stress", "frames", "300"});
+  args.addOption(
+      {"close-stage",
+       "load|install|submit|prepare|bootstrap|decode|late-loader|drain|native",
+       "stage", "load"});
+  args.addOption({"fault-stage", "load|submit|present (explicit simulation)",
+                  "stage", "submit"});
+  args.addOption({"inject-zero-shared",
+                  "Test-only acceptance observation injection (always fails)"});
+#endif
   args.process(app);
-  auto backend = args.value("backend").toStdString(), mode = args.value("presentation").toStdString();
+#ifdef DEMO_E2E
+  if (!QStringList{"load", "install", "submit", "prepare", "bootstrap",
+                   "decode", "late-loader", "drain", "native"}
+           .contains(args.value("close-stage")) ||
+      !QStringList{"load", "submit", "present"}.contains(
+          args.value("fault-stage"))) {
+    std::cerr << "invalid close-stage/fault-stage" << std::endl;
+    return 1;
+  }
+#endif
+  auto backend = args.value("backend").toStdString(),
+       mode = args.value("presentation").toStdString();
   if ((backend != "cpu" && backend != "vulkan") ||
       (mode != "auto" && mode != "shared" && mode != "readback")) {
     std::cerr << "invalid backend/presentation" << std::endl;
@@ -593,15 +943,50 @@ int main(int argc, char **argv) {
   }
   std::filesystem::path assetRoot;
   try {
-    assetRoot = demo::validateAssetRoot(args.isSet("asset-root")
-                                            ? std::filesystem::path(args.value("asset-root").toStdString())
-                                            : demo::defaultAssetRoot());
+    assetRoot = demo::validateAssetRoot(
+        args.isSet("asset-root")
+            ? std::filesystem::path(args.value("asset-root").toStdString())
+            : demo::defaultAssetRoot());
   } catch (std::exception const &e) {
     std::cerr << "asset root error: " << e.what() << std::endl;
     return 1;
   }
   demo::Viewer viewer(app, backend, mode, args.value("model").toStdString(),
-                      args.value("self-test").toStdString(), args.value("screenshot").toStdString(),
-                      assetRoot);
+                      args.value("self-test").toStdString(),
+                      args.value("screenshot").toStdString(), assetRoot);
+#ifdef DEMO_E2E
+  auto scenario = args.value("scenario").toStdString();
+  bool ok = false;
+  auto frames = args.value("frames").toUInt(&ok);
+  if (!ok || !frames || frames > 10000) {
+    viewer.requestStop();
+    viewer.code = 1;
+  }
+  if (scenario == "close-loading") {
+    auto stage = args.value("close-stage").toStdString();
+    viewer.test = "close-" + stage;
+    if (stage == "bootstrap")
+      QTimer::singleShot(0, &viewer, [&] {
+        viewer.desiredCloseObserved = true;
+        std::cout << "close during bootstrap" << std::endl;
+        viewer.requestStop();
+      });
+  } else if (scenario == "faults")
+    viewer.test =
+        "injected-" + args.value("fault-stage").toStdString() + "-fault";
+  else if (scenario == "cycle" || scenario == "resize" ||
+           scenario == "fallback") {
+    viewer.test = "e2e-" + scenario;
+    viewer.scenario.name = scenario;
+    viewer.scenario.frames = frames;
+  } else {
+    viewer.code = 1;
+    viewer.requestStop();
+  }
+  viewer.injectZeroShared = args.isSet("inject-zero-shared");
+  viewer.heartbeat.start();
+  viewer.script.start();
+  viewer.window->viewport().setFixedSize(160, 120);
+#endif
   return app.exec();
 }

@@ -136,7 +136,8 @@ bool ViewportHost::eventFilter(QObject *object, QEvent *event) {
         auto pixels = native_->physicalExtent();
         commands_.viewport(
             {{width(), height()}, {pixels.width(), pixels.height()}, d},
-            exposed && isVisible() && width() > 0 && height() > 0);
+            exposed && isVisible() && width() > 0 && height() > 0 &&
+                pixels.width() > 0 && pixels.height() > 0);
       }
     }
   }

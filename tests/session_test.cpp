@@ -1046,3 +1046,55 @@ TEST_CASE(
   CHECK(s.snapshot()->ambient == doctest::Approx(1.5));
   CHECK(spin->value() == doctest::Approx(1.5));
 }
+
+TEST_CASE(
+    "shutdown/two-submit-receipts-held-drain-and-release-never-block-gui") {
+  Harness h;
+  auto r = resources();
+  auto a = std::make_unique<FakePresentation>();
+  auto b = a.get();
+  RenderSession *owner = nullptr;
+  UiCommands commands;commands.stop = [&] { if (owner) owner->requestStop(); };
+  MainWindow window(commands);window.show();
+  auto events = h.events();
+  events.onStopped = [&] { h.stopped = true;window.showSnapshot(owner->snapshot());window.close(); };
+  RenderSession s(std::move(r.runtime), std::move(r.renderer),
+                  std::move(r.world), std::move(a), h.submit(), events);
+  owner = &s;
+  start(s, true);
+  REQUIRE(test::until([&] { return b->stages().size() == 1; }));
+  b->complete();
+  REQUIRE(test::until([&] { return h.jobs.size() == 2; }));
+  window.close();
+  window.close();
+  unsigned ticks = 0;
+  QTimer heartbeat;
+  QObject::connect(&heartbeat, &QTimer::timeout, [&] { ++ticks; });
+  heartbeat.start(1);
+  REQUIRE(test::until([&] { return ticks >= 5; }));
+  CHECK_FALSE(h.stopped);
+  CHECK(window.isVisible());
+  CHECK(s.snapshot()->performance.inFlight == 2);
+  h.complete(0);
+  h.complete(0);
+  h.complete(1);
+  REQUIRE(test::until([&] { return b->stages().size() == 2; }));
+  CHECK(s.snapshot()->performance.inFlight == 0);
+  CHECK(b->stages()[1] == "drain");
+  auto t = ticks;
+  REQUIRE(test::until([&] { return ticks >= t + 5; }));
+  CHECK_FALSE(h.stopped);
+  CHECK(window.isVisible());
+  b->complete();
+  REQUIRE(test::until([&] { return b->stages().size() == 3; }));
+  CHECK(b->stages()[2] == "release");
+  CHECK_FALSE(h.stopped);
+  CHECK(window.isVisible());
+  t = ticks;
+  REQUIRE(test::until([&] { return ticks >= t + 5; }));
+  b->complete();
+  REQUIRE(test::until([&] { return h.stopped; }));
+  CHECK_FALSE(window.isVisible());
+  CHECK(h.jobs.size() == 2);
+  CHECK(s.snapshot()->life == LifeState::Stopped);
+}

@@ -19,6 +19,8 @@ struct LoadTicket {
 // cooperative stop. Session injection is nonowning: service must outlive
 // Session::onStopped. Tickets may outlive completion; cancel is repeatable, not
 // producer destruction.
+// Destruction requires GUI owner and assertIdle(); active destruction is fatal.
+// Pool/root/GUI context remain alive through the application root join.
 class AssetLoader {
 public:
   using AppToken =
@@ -33,6 +35,10 @@ public:
   LoadTicket beginLoad(AssetEntry, AssetRequestId,
                        std::function<void(LoadOutcome)>);
   std::size_t inFlight() const;
+  void assertIdle() const;
+  // Queued GUI notification after ALL producer receipts retire; cancellation is
+  // not idle.
+  void setIdleHandler(std::function<void()>);
 
 private:
   struct Impl;

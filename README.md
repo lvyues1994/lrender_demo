@@ -160,3 +160,61 @@ locks is a deliberate future review action, not an automatic configure step.
 | third_party/tc_etcdec | `972875d403ed8ac27e0f35c2f29d819e710a688a` | 972875d403ed8ac27e0f35c2f29d819e710a688a |
 | third_party/tl_expected | `1770e3559f2f6ea4a5fb4f577ad22aeb30fbd8e4` | 1770e3559f2f6ea4a5fb4f577ad22aeb30fbd8e4 |
 | assets/sources/tinyrenderer | `97eb7a480e762285899a93c5d21e70a79e60782e` | resource source, not a build dependency |
+
+
+## Shutdown / P11 acceptance
+ApplicationLifetime::requestExit is idempotent. GUI keeps processing while Session
+settles accepted submissions, drains, destroys target, worker flushes/releases
+presenter, GUI retires native host, worker destroys renderer/World/runtime, and
+onStopped arrives. Application additionally waits for *all* actual AssetLoader
+receipts, including canceled-but-running producers, before releasing loader,
+closing its ObjectScope/root and joining root asynchronously. QApplication and
+GUI/pool remain alive through root join. No GUI sync_wait/flush/thread join.
+Wrong-owner/active-loader/early-eventloop destruction diagnoses a contract
+violation rather than silently destroying live resources. Every second during
+shutdown a waiting status is logged; it NEVER forcibly frees driver resources.
+A hard driver hang cannot be safely recovered by killing a worker. CTest TIMEOUT
+is an external test-failure bound, not production shutdown or a recovery claim.
+
+```
+cmake -S . -B build/plan-debug -DDEMO_ENABLE_STRICT_SHARED_TEST=ON -DDEMO_ENABLE_GPU_E2E=ON
+cmake --build build/plan-debug --target demo_tests demo_e2e demo_qt_vulkan_probe lrender_demo --parallel 2
+ctest --test-dir build/plan-debug -L unit --output-on-failure
+ctest --test-dir build/plan-debug -L platform --output-on-failure
+ctest --test-dir build/plan-debug -L e2e --output-on-failure
+build/plan-debug/demo_e2e --backend vulkan --presentation shared --model floor --frames 300 --scenario cycle
+QT_SCALE_FACTOR=1.25 build/plan-debug/demo_e2e --backend vulkan --presentation shared --frames 300 --scenario resize
+build/plan-debug/demo_e2e --backend cpu --presentation readback --scenario close-loading --close-stage late-loader
+```
+`demo_e2e` is the same real Widgets/Session application with bounded test-only
+scenario actions, not a fake rendering implementation. Cycle actually installs
+and waits for a subsequent renderer receipt for each of all four catalog models,
+then issues100 coalescible model and100 pipeline commands (NOT100 completed model
+installations) and waits for requested real receipts. Resize issues100 coalescible
+commands with hide/zero/show, then waits for restored actual rendering. E2E
+`--frames`1..10000 bounds receipts, not GPU presentation count. Required sharing
+always additionally requires sharedShown>0. GPU tests are opt-in and FAIL rather
+than77skip; only ordinary native probe can report77. Negative tests use an exact
+exit1+root-joined+diagnostic wrapper, never treat arbitrary crashes/timeouts as
+success. `--scenario faults --fault-stage load|submit|present` and
+`--inject-zero-shared` are explicit simulated faults, not physical device loss.
+For read/decode/install/prepare/submit/drain/native/early-bootstrap closure use
+`--scenario close-loading --close-stage load|decode|install|prepare|submit|drain|native|bootstrap|late-loader`.
+Late-loader holds an actual bounded producer until GUI heartbeat progresses
+AFTER Session onStopped, exercising the prior finish-return hang. On CPU,
+native-loss is explicitly simulated; actual Linux/xcb native invalidation is
+covered by real-window full self-test. No non-xcb platform support is claimed.
+Widget screenshots exclude the native child; `*-widgets.png` is chrome only for
+Shared, `*-native-window.png` is the actual own XID capture. No combined image is
+represented as an original screenshot or author-approved normal-map golden.
+
+Dependency guard validates14 clean pinned checkouts on every build as well as
+configure/CTest. Disposable fixtures test wrong SHA/missing/dirty/traversal/
+escaping symlink and cached-build dirtiness; never corrupt actual dependencies.
+To reconstruct a lock after an explicitly approved dependency update, inspect
+all14 local `git rev-parse HEAD`, source URL/branch/upstream pin declarations,
+compare the approved full-SHA list, edit/review records deliberately, then run
+VerifyDependencies and clean configure/build/unit. Never regenerate by floating
+fetch or blindly replacing locked SHA with current HEAD. Doctest's self-reported
+header version remains source metadata distinct from its pinned commit; no
+unsupported version or upstream compatibility assertion is inferred.

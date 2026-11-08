@@ -222,3 +222,10 @@ TEST_CASE("native_surface/p9-timeout-never-calls-late-driver-with-unwound-instan
  CHECK(driverCalls==0);
  CHECK(lease->policy->canRelease());factory.releaseHost();
 }
+
+TEST_CASE("native-policy/unavailable-physical-extent-is-zero-not-QSize-invalid-minus-one") {
+  demo::NativeSurfaceFactory factory([](VkInstance){return reinterpret_cast<VkSurfaceKHR>(std::uintptr_t{2});},nullptr,true);
+  factory.setViewport(QSize(0,0));
+  auto extent=factory.physicalExtent();
+  CHECK(extent.width()==0);CHECK(extent.height()==0);
+}

@@ -665,3 +665,42 @@ TEST_CASE("asset_async/p9-temporal-history-restarts-once-after-texture-settlemen
   CHECK(payloads == 1);
   stop(session, h);
 }
+
+#include "app/ApplicationLifetime.h"
+TEST_CASE(
+    "shutdown/late-real-loader-cancel-receipt-wakes-app-after-session-stop") {
+  Gate gate;
+  App app([&](auto const &e, auto stop) { return gate.decode(e, stop); });
+  unsigned retired = 0, receipt = 0, joins = 0;
+  ApplicationLifetime life(
+      {{}, [&] { ++retired; }, {}, {}, [&] { ++joins; }, {}});
+  life.start();
+  struct ClearIdle {
+    AssetLoader *loader;
+    ~ClearIdle() { loader->setIdleHandler({}); }
+  } clear{app.loader.get()};
+  app.loader->setIdleHandler(
+      [&] { life.onShutdownProgress(false, true, app.loader->inFlight()); });
+  auto ticket = app.loader->beginLoad(entry("floor"), 987, [&](auto result) {
+    CHECK(result.status == LoadStatus::Cancelled);
+    CHECK(app.loader->inFlight() == 1);
+    ++receipt;
+    life.onShutdownProgress(false, true, app.loader->inFlight());
+  });
+  REQUIRE(test::until([&] { return gate.started == 1; }));
+  CHECK_THROWS_AS(app.loader->assertIdle(), std::logic_error);
+  ticket.cancel();
+  life.onShutdownProgress(false, true, 1);
+  life.requestExit();
+  CHECK(retired == 0);
+  CHECK(receipt == 0);
+  CHECK(joins == 0);
+  gate.release("floor");
+  REQUIRE(test::until([&] { return joins == 1; }));
+  CHECK(receipt == 1);
+  CHECK(retired == 1);
+  CHECK_NOTHROW(app.loader->assertIdle());
+  app.loader->setIdleHandler({});
+  life.onRootJoined();
+  life.assertSafeDestruction();
+}

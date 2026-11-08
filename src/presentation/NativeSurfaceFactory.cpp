@@ -263,9 +263,13 @@ void NativeSurfaceFactory::setVisible(bool visible) {
 }
 QSize NativeSurfaceFactory::physicalExtent() const {
     requireGui();
-    if (!window_ || requested_.width() <= 0 || requested_.height() <= 0) return {};
-    if (nativeExtent_)
-      return nativeExtent_(); // actual XCB pixels, no fractional-DPR rounding guess
+    if (!window_ || requested_.width() <= 0 || requested_.height() <= 0) return QSize(0, 0);
+    if (nativeExtent_) {
+      auto actual = nativeExtent_(); // actual XCB pixels, no fractional-DPR rounding guess
+      // QSize{} is (-1,-1), not an empty rendering extent. An unavailable
+      // geometry is a pause input, never an invalid command through Qt events.
+      return actual.width() > 0 && actual.height() > 0 ? actual : QSize(0, 0);
+    }
     return QSize(qRound(window_->width() * window_->devicePixelRatio()), qRound(window_->height() * window_->devicePixelRatio()));
 }
 double NativeSurfaceFactory::devicePixelRatio() const { requireGui(); return window_ ? window_->devicePixelRatio() : 1.0; }
