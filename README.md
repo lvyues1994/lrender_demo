@@ -1,4 +1,4 @@
-# lrender Qt Vulkan demo (P10 milestone, P11 pending)
+# lrender Qt Vulkan demo
 
 Qt5.15 Widgets viewer using real lrender/lexec/lqtexec. Vulkan is default;
 CPU is used only with explicit `--backend cpu`. No general OBJ/MTL editor/importer.
@@ -15,7 +15,7 @@ GCC13.3 and NVIDIA RTX5070Ti on Linux XCB. No Qt private ABI or Qt-owned VkSurfa
 ```sh
 cd /absolute/path/to/lrender_demo
 cmake -S . -B build/plan-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build/plan-debug --target lrender_demo demo_tests demo_qt_vulkan_probe --parallel 2
+cmake --build build/plan-debug --target lrender_demo demo_tests demo_link_smoke demo_qt_vulkan_probe --parallel 2
 cmake -P cmake/VerifyDependencies.cmake
 QT_QPA_PLATFORM=offscreen build/plan-debug/demo_tests --no-skip=true
 QT_QPA_PLATFORM=offscreen ctest --test-dir build/plan-debug -L unit --output-on-failure
@@ -127,11 +127,24 @@ cameraCut on the next accepted submit. Real CPU sample1 plus actual GPU/shared/D
 regression are required evidence, not an assumption cameraCut resets PT. Pipeline,
 TAA-enable/disable, scene, extent and native-loss boundaries still drain/rebuild.
 
-P11 is still pending: dedicated loader/pool/root/onStopped exit assertions,
-finish-with-active-loader hang resolution, stalled-cleanup UX without unsafe forced
-GPU destruction, zero-shared injection and device-loss regression. True driver
-hang/device reset/non-XCB sharing remain unverified; a running native GPU call
-cannot be forcibly cancelled. No claim that the entire11-step product is complete.
+P11 implementation at `443acbbeeec174a0c6c966ed9068c7025268777d` passed independent
+review (PASS/APPROVED, no Critical/Important findings). Final fresh full CTest
+passed 26/26 with zero skips; evidence is
+.superpowers/sdd/task-11-final-verification.log. This covers loader/pool/root/
+onStopped lifetime assertions, the active-loader shutdown hang, nonblocking wait
+diagnostics, zero-shared rejection and explicitly simulated failure boundaries.
+True driver hang/physical device loss/device reset/non-XCB sharing remain
+unverified; a running native GPU call cannot be forcibly cancelled. Approval is
+for the tested Linux/xcb scope, not a cross-platform or hardware-fault guarantee.
+
+Remaining nonblocking review notes: CPU auto fallback diagnostic/error labeling
+is ambiguous; strict negative expected text is broad, but exact exit1 plus graceful
+root-joined gating protects against arbitrary crashes/timeouts; repeated
+close-loading test naming is cosmetic; one manual DPR run observed 101ms maximum
+GUI gap; root-joined pool-epilogue waiting is deliberately unbounded/fail-closed,
+never an excuse to destroy active resources. These are recorded limitations, not
+claims of further functionality. Independent approval does not itself merge,
+push or hand over the branch.
 
 ## Exact local source lock
 
