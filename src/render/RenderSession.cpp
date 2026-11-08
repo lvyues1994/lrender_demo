@@ -107,8 +107,9 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
                                   [self]() noexcept {
                                     self->noticeQueued = false;
                                     try {
-                                      if (self->events.onSnapshot)
-                                        self->events.onSnapshot(self->snapshot());
+                                      auto callback = self->events.onSnapshot;
+                                      if (callback)
+                                        callback(self->snapshot());
                                     } catch (...) {
                                       qWarning() << "Session: snapshot observer threw";
                                     }
@@ -118,8 +119,9 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   void report(RenderError error) {
     lastError = error;
     try {
-      if (events.onError)
-        events.onError(error);
+      auto callback = events.onError;
+      if (callback)
+        callback(error);
     } catch (...) {
       qWarning() << "Session: error observer threw";
     }
@@ -462,8 +464,9 @@ void RenderSession::Impl::JoinReceiver::set_value() && noexcept {
     owner->phase = Stopped;
     owner->state.stopped();
     try {
-      if (owner->events.onStopped)
-        owner->events.onStopped();
+      auto callback = owner->events.onStopped;
+      if (callback)
+        callback();
     } catch (...) {
       qWarning() << "Session: stopped observer threw";
     }

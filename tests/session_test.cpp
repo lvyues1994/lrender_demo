@@ -538,3 +538,37 @@ TEST_CASE("session/image-delivery-fault-preserves-original-cause") {
   CHECK(h.errors.back().cause == "original image observer failure");
   stop(s, h);
 }
+
+TEST_CASE("session/snapshot-observer-may-destroy-wrapper-with-live-callback-captures") {
+  struct Tracked : ReadbackAdapter {
+    std::shared_ptr<std::atomic<bool>> destroyed;
+    explicit Tracked(std::shared_ptr<std::atomic<bool>> flag) : ReadbackAdapter({}), destroyed(flag) {}
+    ~Tracked() { destroyed->store(true); }
+  };
+  auto destroyed = std::make_shared<std::atomic<bool>>(false);
+  auto keep = std::make_shared<int>(1);
+  std::weak_ptr<int> weak = keep;
+  std::unique_ptr<RenderSession> s;
+  bool alive = false, returned = false;
+  SessionEvents events;
+  events.onSnapshot = [keep, &s, &weak, &alive, &returned](auto) {
+    // Copy reference addresses before self-destruction: no access to a destroyed closure.
+    auto session = &s;
+    auto w = &weak;
+    auto a = &alive;
+    auto r = &returned;
+    session->reset();
+    *a = !w->expired();
+    *r = true;
+  };
+  auto resource = resources();
+  s = std::make_unique<RenderSession>(std::move(resource.runtime), std::move(resource.renderer),
+                                      std::move(resource.world), std::make_unique<Tracked>(destroyed),
+                                      SubmitFrame{}, std::move(events));
+  keep.reset();
+  s->start();
+  REQUIRE(test::until([&] { return returned; }));
+  CHECK(alive);
+  REQUIRE(test::until([&] { return destroyed->load(); }));
+  CHECK(weak.expired());
+}

@@ -5,6 +5,7 @@
 namespace demo {
 class AssetLoader; // P8 nonowning injection only; no invented implementation
 // GUI-thread lifetime and serial commands; inputs are initialized owned resources.
+// Supply a serial-host World (no parallel-propagation waits on the GUI owner).
 // Shutdown is asynchronous: keep the application event loop alive through onStopped.
 // Destruction detaches UI observers, not accepted producer/cleanup work. A nonempty
 // SubmitFrame override must eventually report any possibly accepted work even after
@@ -26,6 +27,7 @@ public:
   void resume();
   void requestStop();
   SessionSnapshotPtr snapshot() const;
+  // Nonowning: ApplicationLifetime keeps the loader alive through session drain.
   void setAssetLoader(AssetLoader &);
 
 private:
