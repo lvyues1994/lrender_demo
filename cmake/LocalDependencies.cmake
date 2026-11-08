@@ -1,0 +1,31 @@
+# Verify before any third-party project can configure or FetchContent can populate.
+include("${CMAKE_CURRENT_LIST_DIR}/VerifyDependencies.cmake")
+include(FetchContent)
+foreach(pair IN ITEMS "LEXEC|lexec" "CO2|co2" "STACKFULL|stackfull"
+    "COMPUTE_SHADERS|compute_shaders" "TL_EXPECTED|tl_expected" "CGLTF|cgltf"
+    "STB|stb" "TC_BCDEC|tc_bcdec" "TC_ETCDEC|tc_etcdec" "TC_ASTCENC|tc_astcenc")
+  string(REPLACE "|" ";" fields "${pair}")
+  list(GET fields 0 key)
+  list(GET fields 1 directory)
+  set(FETCHCONTENT_SOURCE_DIR_${key} "${PROJECT_SOURCE_DIR}/third_party/${directory}" CACHE PATH "Verified local source" FORCE)
+endforeach()
+set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL "No implicit downloads" FORCE)
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "No implicit updates" FORCE)
+FetchContent_Declare(lexec SOURCE_DIR "${PROJECT_SOURCE_DIR}/third_party/lexec")
+FetchContent_MakeAvailable(lexec)
+add_subdirectory("${PROJECT_SOURCE_DIR}/third_party/lrender" "${PROJECT_BINARY_DIR}/third_party/lrender")
+add_subdirectory("${PROJECT_SOURCE_DIR}/third_party/lqtexec" "${PROJECT_BINARY_DIR}/third_party/lqtexec")
+if(NOT TARGET astcenc-none-static)
+  message(FATAL_ERROR "Locked astcenc is incompatible: missing astcenc-none-static")
+endif()
+get_target_property(lexec_includes lexec INTERFACE_INCLUDE_DIRECTORIES)
+if(NOT "${PROJECT_SOURCE_DIR}/third_party/lexec/include" IN_LIST lexec_includes)
+  message(FATAL_ERROR "lexec target does not use the verified local source")
+endif()
+# These upstream header repositories unconditionally declare sample executables.
+# They have no OFF switch; exclude them from default builds without editing source.
+foreach(sample IN ITEMS bcdec etcdec)
+  if(TARGET ${sample})
+    set_target_properties(${sample} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+  endif()
+endforeach()

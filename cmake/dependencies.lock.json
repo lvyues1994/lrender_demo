@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "notes": "Locked local source HEADs; upstreamPin records unmodified upstream declarations, not proof of compatibility. Qt/Vulkan SDK/Clang are system dependencies.",
+  "records": [
+    {
+      "path": "third_party/cgltf",
+      "url": "https://github.com/jkuhlmann/cgltf.git",
+      "branch": "master",
+      "sha": "85cd62382dfea638278962690cf515023f33ed00",
+      "upstreamPin": "360db1a95480fe102ae9c69b27c5d101167ff5ba"
+    },
+    {
+      "path": "third_party/co2",
+      "url": "https://github.com/lvyues1994/coro.git",
+      "branch": "main",
+      "sha": "a265e5771b0e3ca68d6d473b9bb410fadddf4c23",
+      "upstreamPin": "a265e5771b0e3ca68d6d473b9bb410fadddf4c23"
+    },
+    {
+      "path": "third_party/compute_shaders",
+      "url": "https://github.com/lvyues1994/compute_shaders.git",
+      "branch": "main",
+      "sha": "03db9f228f07269a4ba721b5145461161d31cbd0",
+      "upstreamPin": "03db9f228f07269a4ba721b5145461161d31cbd0"
+    },
+    {
+      "path": "third_party/doctest",
+      "url": "https://github.com/doctest/doctest.git",
+      "branch": "master",
+      "sha": "d44d4f6e66232d716af82f00a063759e9d0e50d6",
+      "upstreamPin": "v2.5.3"
+    },
+    {
+      "path": "third_party/lexec",
+      "url": "https://github.com/lvyues1994/lexec.git",
+      "branch": "main",
+      "sha": "a2568cc5bf14f69addc7d0e04b1e5ed5c0b2173b",
+      "upstreamPin": "lrender: a2568cc5bf14f69addc7d0e04b1e5ed5c0b2173b; lqtexec fallback: e032d551d53d87209b83d07fd172890461db643b (not used; shared existing lexec::lexec target)"
+    },
+    {
+      "path": "third_party/lqtexec",
+      "url": "https://github.com/lvyues1994/lqtexec.git",
+      "branch": "main",
+      "sha": "f9c8d69d180f5c53bada3c3f408b9c356879a2e5",
+      "upstreamPin": "direct demo dependency; latest default-branch HEAD at download, frozen by sha"
+    },
+    {
+      "path": "third_party/lrender",
+      "url": "https://github.com/lvyues1994/lrender.git",
+      "branch": "main",
+      "sha": "dcf36670724c65b016db9234309ad49192dda6c8",
+      "upstreamPin": "direct demo dependency; latest default-branch HEAD at download, frozen by sha"
+    },
+    {
+      "path": "third_party/stackfull",
+      "url": "https://github.com/lvyues1994/stackfull.git",
+      "branch": "main",
+      "sha": "acb88611e1de8fbe7ed6e195ba76ad9cbb04a9dc",
+      "upstreamPin": "acb88611e1de8fbe7ed6e195ba76ad9cbb04a9dc"
+    },
+    {
+      "path": "third_party/stb",
+      "url": "https://github.com/nothings/stb.git",
+      "branch": "master",
+      "sha": "4e9b368bfc071e97206ea5c6adba68dd0cbf8897",
+      "upstreamPin": "003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5"
+    },
+    {
+      "path": "third_party/tc_astcenc",
+      "url": "https://github.com/ARM-software/astc-encoder.git",
+      "branch": "main",
+      "sha": "2bed807e63d5bd756d26cd00604e5ae3b86e3348",
+      "upstreamPin": "5.7.0"
+    },
+    {
+      "path": "third_party/tc_bcdec",
+      "url": "https://github.com/iOrange/bcdec.git",
+      "branch": "main",
+      "sha": "80859ed3b7afb1c527a2a99d70c61457bea72d0c",
+      "upstreamPin": "80859ed3b7afb1c527a2a99d70c61457bea72d0c"
+    },
+    {
+      "path": "third_party/tc_etcdec",
+      "url": "https://github.com/iOrange/etcdec.git",
+      "branch": "main",
+      "sha": "972875d403ed8ac27e0f35c2f29d819e710a688a",
+      "upstreamPin": "972875d403ed8ac27e0f35c2f29d819e710a688a"
+    },
+    {
+      "path": "third_party/tl_expected",
+      "url": "https://github.com/TartanLlama/expected.git",
+      "branch": "master",
+      "sha": "1770e3559f2f6ea4a5fb4f577ad22aeb30fbd8e4",
+      "upstreamPin": "1770e3559f2f6ea4a5fb4f577ad22aeb30fbd8e4"
+    },
+    {
+      "path": "assets/sources/tinyrenderer",
+      "url": "https://github.com/ssloy/tinyrenderer.git",
+      "branch": "master",
+      "sha": "97eb7a480e762285899a93c5d21e70a79e60782e",
+      "upstreamPin": "resource source, not a build dependency"
+    }
+  ]
+}
