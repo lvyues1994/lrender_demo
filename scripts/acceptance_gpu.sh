@@ -5,7 +5,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD="${DEMO_BUILD_DIR:-$ROOT/build}"
+BUILD="${DEMO_BUILD_DIR:-$ROOT/build/plan-debug}"
 CTEST_BIN="${CTEST_BIN:-ctest}"
 
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -87,6 +87,10 @@ if [[ ! -d "$BUILD" ]]; then
   red "INCOMPLETE: build dir missing: $BUILD"
   exit 2
 fi
+if [[ ! -f "$BUILD/CTestTestfile.cmake" ]]; then
+  red "INCOMPLETE: no CTestTestfile.cmake in $BUILD (wrong build dir?)"
+  exit 2
+fi
 
 LOG_DIR="${TMPDIR:-/tmp}/acceptance_gpu_$$"
 mkdir -p "$LOG_DIR"
@@ -95,62 +99,70 @@ trap 'rm -rf "$LOG_DIR"' EXIT
 failed=0
 skipped=0
 
-run_ctest() {
-  local name="$1"
-  local log="$LOG_DIR/$name.log"
-  yellow ">> $name"
-  local rc=0
-  "$CTEST_BIN" --test-dir "$BUILD" -R "^${name}$" --output-on-failure -V >"$log" 2>&1 || rc=$?
 
-  if grep -Eq '^\s*[0-9]+/[0-9]+ Test\s+#.+:.+(Skipped|\*\*\*Skipped)' "$log" \
-     || grep -Eq 'SKIP_RETURN_CODE|black-flash SKIP|exit code[: ]+77' "$log"; then
+require_ctest_passed() {
+  local name="$1"
+  local log="$2"
+  local rc="$3"
+  if grep -Eq 'No tests were found|0 tests failed out of 0' "$log" && ! grep -Eq "Test #.*${name}|1/1 Test" "$log"; then
+    red "FAIL: $name — no tests found"
+    tail -40 "$log"
+    failed=1
+    return 1
+  fi
+  if ! grep -Eq "Test +#[0-9]+: ${name}[ .]+\*+Passed|${name}[ .]+Passed" "$log" \
+     && ! grep -Eq "^[0-9]+/[0-9]+ Test[ ]+#[0-9]+: ${name}[ .]+Passed" "$log"; then
+    # ctest -V typically: "1/1 Test #26: e2e_shared_black_flash ...........   Passed"
+    if ! grep -F "$name" "$log" | grep -Eq 'Passed'; then
+      red "FAIL: $name — Passed line missing (rc=$rc)"
+      tail -60 "$log"
+      failed=1
+      return 1
+    fi
+  fi
+  if grep -Eq 'Skipped|\*\*\*Skipped|SKIP_RETURN_CODE|black-flash SKIP|exit code[: ]+77' "$log"; then
     red "INCOMPLETE: $name SKIPPED"
     tail -40 "$log"
     skipped=1
-    return 0
+    return 1
   fi
   if [[ $rc -ne 0 ]]; then
     red "FAIL: $name (ctest exit=$rc)"
     tail -60 "$log"
     failed=1
-    return 0
+    return 1
   fi
-  # Also treat "No tests were found" as fail
-  if grep -Eq 'No tests were found|0 tests failed out of 0' "$log" && ! grep -Eq '1/1 Test' "$log"; then
-    # ctest with -R miss returns 0 sometimes with 0 tests
-    if ! grep -Eq 'Test #|1/1 Test' "$log"; then
-      red "FAIL: $name — no matching test"
-      failed=1
-      return 0
-    fi
+  return 0
+}
+
+run_ctest() {
+  local name="$1"
+  local log="$LOG_DIR/$name.log"
+  yellow ">> $name"
+  local rc=0
+  "$CTEST_BIN" --test-dir "$BUILD" -R "^${name}$" --output-on-failure -V --no-tests=error >"$log" 2>&1 || rc=$?
+  if require_ctest_passed "$name" "$log" "$rc"; then
+    green "PASS: $name"
+    grep -E 'blackSamples|hostChanges|sharedShownGap|latency|sharedShown|resize capture|Resize capture|host change|black-flash|DPR' "$log" \
+      | tee -a "$LOG_DIR/metrics.txt" >/dev/null || true
   fi
-  green "PASS: $name"
-  grep -E 'blackSamples|hostChanges|sharedShownGap|latency|sharedShown|resize capture|Resize capture|host change|black-flash|DPR' "$log" \
-    | tee -a "$LOG_DIR/metrics.txt" >/dev/null || true
   return 0
 }
 
 echo
 echo "--- black-flash ×3 ---"
 for i in 1 2 3; do
-  # Distinct log names so scrapes keep all runs
   yellow ">> e2e_shared_black_flash ($i/3)"
   log="$LOG_DIR/e2e_shared_black_flash_$i.log"
   rc=0
-  "$CTEST_BIN" --test-dir "$BUILD" -R '^e2e_shared_black_flash$' --output-on-failure -V >"$log" 2>&1 || rc=$?
-  if grep -Eq '^\s*[0-9]+/[0-9]+ Test\s+#.+:.+(Skipped|\*\*\*Skipped)' "$log" \
-     || grep -Eq 'SKIP_RETURN_CODE|black-flash SKIP|exit code[: ]+77' "$log"; then
-    red "INCOMPLETE: e2e_shared_black_flash ($i/3) SKIPPED"
-    tail -40 "$log"
-    skipped=1
-  elif [[ $rc -ne 0 ]]; then
-    red "FAIL: e2e_shared_black_flash ($i/3) (ctest exit=$rc)"
-    tail -60 "$log"
-    failed=1
-  else
+  # --no-tests=error: missing regex match is a hard failure, not a silent pass
+  "$CTEST_BIN" --test-dir "$BUILD" -R '^e2e_shared_black_flash$' --output-on-failure -V --no-tests=error >"$log" 2>&1 || rc=$?
+  if require_ctest_passed e2e_shared_black_flash "$log" "$rc"; then
     green "PASS: e2e_shared_black_flash ($i/3)"
     grep -E 'blackSamples|hostChanges|sharedShownGap|latency|sharedShown|resize capture|Resize capture|host change|black-flash' "$log" \
       | tee -a "$LOG_DIR/metrics.txt" >/dev/null || true
+  else
+    yellow "(black-flash $i/3 did not pass — see above)"
   fi
 done
 

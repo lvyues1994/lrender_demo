@@ -1086,11 +1086,9 @@ struct Viewer : QObject {
 
 namespace {
 // Resolve the loginctl session for *this* DISPLAY — never "first seat0".
-// Prefer $XDG_SESSION_ID; else match session Display to $DISPLAY; else the sole
-// active local x11/wayland session for the current uid.
+// Prefer Display==$DISPLAY among non-Remote sessions; else $XDG_SESSION_ID;
+// else the sole active local x11/wayland user session.
 std::string resolveLogindSessionId() {
-  if (const char *id = std::getenv("XDG_SESSION_ID"); id && id[0])
-    return id;
   std::string display = std::getenv("DISPLAY") ? std::getenv("DISPLAY") : "";
   // Strip screen suffix (:1.0 → :1) for comparison.
   auto bare = display;
@@ -1136,7 +1134,7 @@ std::string resolveLogindSessionId() {
     auto cls = grab("Class");
     auto active = grab("Active");
     auto remote = grab("Remote");
-    if (!bare.empty() && !sessDisplay.empty()) {
+    if (remote != "yes" && !bare.empty() && !sessDisplay.empty()) {
       auto sd = sessDisplay;
       if (auto dot = sd.find('.'); dot != std::string::npos)
         sd.resize(dot);
@@ -1148,6 +1146,8 @@ std::string resolveLogindSessionId() {
   }
   if (!displayMatch.empty())
     return displayMatch;
+  if (const char *id = std::getenv("XDG_SESSION_ID"); id && id[0])
+    return id;
   if (graphical.size() == 1)
     return graphical.front();
   return {};
