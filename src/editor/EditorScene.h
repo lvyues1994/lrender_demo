@@ -60,6 +60,9 @@ public:
   // (stable entt id across rollback — E3 undo + E4 selection); create only for
   // new World ids; destroy Installed no longer in the list. Then restore every
   // WorldLink parent/local from World. Never marks Dirty.
+  // meshes/materials: length must match worldEntities (installer catalog size check
+  // only). MeshRef/MaterialRef content always comes from World::renderableOf (R1);
+  // catalog ids are never written into the editor.
   void remirrorInstalledFromWorld(lr::scene::World &world,
                                   std::vector<lr::core::EntityId> const &worldEntities,
                                   std::vector<std::string> const &names,

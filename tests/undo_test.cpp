@@ -430,11 +430,51 @@ TEST_CASE("undo/merge-guard-epoch-survives-undo-end") {
     CHECK_FALSE(hist.isMerging());
     hist.beginMerge();
     CHECK(hist.isMerging());
-  } // outer dtor: stale epoch → no-op; must not end the beginMerge above incorrectly
-  // beginMerge inside outer scope was ended only if outer matched epoch — it must not.
-  // After outer dtor with stale epoch, the manual beginMerge should still be active...
-  // Wait: beginMerge inside outer's scope — if outer is stale, beginMerge's merge stays open.
+  } // outer dtor is stale (epoch mismatch) → no-op; manual beginMerge above stays open.
   CHECK(hist.isMerging());
   hist.endMerge();
   CHECK_FALSE(hist.isMerging());
+}
+
+TEST_CASE("undo/readopt-adopt-branch-uses-world-mesh-not-installer") {
+  // E3 Minor: World entity never mirrored before; World has meshB, installer lists meshA.
+  // New-branch adopt must take World SoT (meshB), not installer catalog meshA.
+  EditorScene scene;
+  auto w = lr::scene::makeWorld({});
+  auto meshA = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+  auto meshB = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({2, 2})));
+  auto mat = w->resources().addMaterial({});
+  auto wid = w->createEntity({}, std::nullopt);
+  w->setRenderable(wid, {meshB, mat});
+  CHECK(scene.registry().view<Installed>().begin() ==
+        scene.registry().view<Installed>().end()); // no prior mirrors
+  scene.readoptInstalledFromWorld(*w, {wid}, {"part0"}, {meshA}, {mat});
+  auto view = scene.registry().view<Installed, MeshRef, WorldLink>();
+  REQUIRE(view.begin() != view.end());
+  entt::entity e = *view.begin();
+  CHECK(scene.registry().get<MeshRef>(e).id == meshB);
+  CHECK(w->renderableOf(wid)->mesh == meshB);
+  demo::test::assertEditorWorldConsistent(scene, *w);
+}
+
+TEST_CASE("undo/readopt-adopt-branch-clears-when-world-has-no-renderable") {
+  // E3 Minor: World entity never mirrored; World has no renderable; installer lists meshA.
+  // Adopt must leave MeshRef/MaterialRef absent (not stamp installer meshA).
+  EditorScene scene;
+  auto w = lr::scene::makeWorld({});
+  auto meshA = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+  auto mat = w->resources().addMaterial({});
+  auto wid = w->createEntity({}, std::nullopt);
+  CHECK_FALSE(w->renderableOf(wid).has_value());
+  scene.readoptInstalledFromWorld(*w, {wid}, {"part0"}, {meshA}, {mat});
+  auto view = scene.registry().view<Installed, WorldLink>();
+  REQUIRE(view.begin() != view.end());
+  entt::entity e = *view.begin();
+  CHECK_FALSE(scene.registry().all_of<MeshRef>(e));
+  CHECK_FALSE(scene.registry().all_of<MaterialRef>(e));
+  CHECK_FALSE(w->renderableOf(wid).has_value());
+  demo::test::assertEditorWorldConsistent(scene, *w);
 }
