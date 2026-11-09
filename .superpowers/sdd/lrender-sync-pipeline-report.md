@@ -3,7 +3,8 @@
 Time: 2026-11-09T15:00:17+0800 (Asia/Shanghai)
 Branch: feat/qt-vulkan-demo
 BASE: 589737cea8fe94c1086a681a062cd58f85d49119
-HEAD: e3dac763f23e6825734208705196c0c3b2d4dbe2
+Implementation commit: 9c1ab0872832c4391bef84d3f01b3677cd0ca8c0
+Tip: use `git rev-parse HEAD` on feat/qt-vulkan-demo (docs commits after the implementation only refresh this report/review.diff)
 
 ## 1) Upstream sync
 
@@ -21,7 +22,7 @@ Commit subject: *The interactive path tracing pipeline denoises the path tracer 
 
 Public API:
 - `PipelineRegistry::pathTraceInteractive()` added (alongside `visibility()` / `pathTraceReference()`).
-- `makePathTraceDenoiseFeature()`: PostProcess SVGF-style denoise of PT mean using visibility guides; &lt;16 samples show denoised colour; 16–64 fade into the reference mean.
+- `makePathTraceDenoiseFeature()`: PostProcess SVGF-style denoise of PT mean using visibility guides; <16 samples show denoised colour; 16–64 fade into the reference mean.
 - New kernel `render/kernels/Denoise.h`, MotionPass helper, DenoiseTest (CPU + GPU backends).
 - Examples/CLI accept `--pipeline pathtrace-interactive` (keys 1/2/3 / Tab).
 
@@ -50,13 +51,13 @@ RED then GREEN:
 - `session/soft-rebuild-pathtrace-interactive-keeps-path-without-release`
 - `ui/options-and-model-commands-snapshot-does-not-loop` (count==3, index 2)
 
-Final unit: **165/165** cases, 6546 assertions (`/tmp/pti-unit-all.log` / CTest demo_tests).
-Final CTest: **27/27**, 0 skip (`/tmp/pti-final-ctest.log`).
+Final unit: **165/165** cases, 6546 assertions.
+Final CTest: **27/27**, 0 skip (`build/plan-debug`, DEMO_ENABLE_GPU_E2E=ON).
 
-Black-flash (pipeline-interactive blackSamples=0 hostChanges=0):
-- Vulkan shared RTX 5070 Ti: exit 0 (`/tmp/pti-shared-bf2.log`; CTest e2e_shared_black_flash ~1.1s)
-- Vulkan readback: exit 0 (`/tmp/pti-readback-bf2.log`)
-- CPU readback offscreen: exit 0 (`/tmp/pti-cpu-bf2.log`) — interactive denoise supported on CPU upstream.
+Black-flash (`pipeline-interactive` blackSamples=0 hostChanges=0):
+- Vulkan shared RTX 5070 Ti: exit 0 (CTest e2e_shared_black_flash ~1.1s)
+- Vulkan readback: exit 0
+- CPU readback offscreen: exit 0 — interactive denoise supported on CPU upstream.
 
 Also: e2e_shared_dpr125 Passed; e2e_gpu_readback Passed; e2e_shared_cycle includes interactive rotation.
 
@@ -87,7 +88,8 @@ Owned files only (no third_party / assets / .vscode; no push/amend):
 
 ## 6) Known limits
 
-- Interactive PT still accumulates like reference PT; denoise is while samples &lt;64 / view moving (upstream semantics).
+- Interactive PT still accumulates like reference PT; denoise is while samples <64 / view moving (upstream semantics).
 - Black-flash on readback does not assert hostChanges (no native host); shared path remains the host-stability authority.
 - third_party checkouts stay gitignored; lock SHA is the reproducible pin.
 - No push in this task.
+- Extra docs commits after 9c1ab08 only maintain this report/review.diff under a gitignored `.superpowers/` path (force-added).
