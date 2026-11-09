@@ -1,6 +1,7 @@
 #include "RenderSession.h"
 #include "AssetInstall.h"
 #include "editor/EditorScene.h"
+#include "editor/commands/CommandHistory.h"
 #include "Diagnostics.h"
 #include "FramePump.h"
 #include "SessionFrameSubmit.h"
@@ -79,6 +80,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   AssetLoader *loader = nullptr; // injection outlives this session through onStopped
   std::unique_ptr<AssetInstall> installer;
   editor::EditorScene editor;
+  editor::CommandHistory history;
   std::map<AssetRequestId, LoadTicket> loads;
   std::optional<AssetEntry> pendingLoad;
   CpuAssetPtr readyAsset;
@@ -630,6 +632,8 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
 
   void adoptInstalledIntoEditor() {
     // Commit path: installer already released previous installed World entities.
+    // E3: model commit clears undo (A1.2 — pipeline/model not on stack; fresh TRS/material history).
+    history.clear();
     editor.clearForModelSwitch();
     if (resources.world)
       editor.syncToWorld(*resources.world);
@@ -1219,7 +1223,9 @@ void RenderSession::setEntityTransform(EditorEntityId id, lr::core::Transform lo
   auto e = s.fromId(id);
   if (!s.editor.registry().valid(e))
     return; // N2: stale id after destroy / model switch — ignore, do not abort
+  auto before = s.editor.registry().get<editor::LocalTransform>(e).value;
   s.editor.setLocalTransform(e, local);
+  s.history.recordTransform(e, before, local);
   s.pump.markDirty();
   s.queueTick();
   s.publish();
@@ -1255,7 +1261,12 @@ void RenderSession::setEntityMeshMaterial(EditorEntityId id, lr::core::MeshId me
   auto e = s.fromId(id);
   if (!s.editor.registry().valid(e))
     return;
+  auto const *meshRef = s.editor.registry().try_get<editor::MeshRef>(e);
+  auto const *matRef = s.editor.registry().try_get<editor::MaterialRef>(e);
+  auto meshBefore = meshRef ? meshRef->id : lr::core::MeshId{};
+  auto matBefore = matRef ? matRef->id : lr::core::MaterialId{};
   s.editor.setMeshMaterial(e, mesh, material);
+  s.history.recordMaterial(e, meshBefore, matBefore, mesh, material);
   s.pump.markDirty();
   s.queueTick();
   s.publish();
@@ -1273,4 +1284,45 @@ void RenderSession::destroyEntity(EditorEntityId id) {
   s.queueTick();
   s.publish();
 }
+void RenderSession::undo() {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked() || !s.history.canUndo())
+    return;
+  s.history.undo(s.editor);
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+}
+void RenderSession::redo() {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked() || !s.history.canRedo())
+    return;
+  s.history.redo(s.editor);
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+}
+bool RenderSession::canUndo() const {
+  return impl_->history.canUndo();
+}
+bool RenderSession::canRedo() const {
+  return impl_->history.canRedo();
+}
+void RenderSession::beginEditMerge() {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked())
+    return;
+  s.history.beginMerge();
+}
+void RenderSession::endEditMerge() {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked())
+    return;
+  s.history.endMerge();
+}
+
 } // namespace demo

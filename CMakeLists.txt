@@ -27,7 +27,7 @@ add_library(entt INTERFACE)
 add_library(EnTT::EnTT ALIAS entt)
 target_include_directories(entt INTERFACE "${PROJECT_SOURCE_DIR}/third_party/entt/src")
 # Consumers must use the upstream WHOLE_ARCHIVE wrapper lr::render, not lr_render.
-add_library(demo_core STATIC src/render/Diagnostics.cpp src/assets/AssetRoot.cpp src/render/SessionState.cpp src/presentation/ReadbackAdapter.cpp src/render/FramePump.cpp src/render/RenderSession.cpp src/render/SessionFrameSubmit.cpp src/assets/AssetCatalog.cpp src/assets/ObjLoader.cpp src/assets/TgaDecoder.cpp src/assets/TinyrendererAdapter.cpp src/assets/AssetLoader.cpp src/render/AssetInstall.cpp src/editor/EditorScene.cpp)
+add_library(demo_core STATIC src/render/Diagnostics.cpp src/assets/AssetRoot.cpp src/render/SessionState.cpp src/presentation/ReadbackAdapter.cpp src/render/FramePump.cpp src/render/RenderSession.cpp src/render/SessionFrameSubmit.cpp src/assets/AssetCatalog.cpp src/assets/ObjLoader.cpp src/assets/TgaDecoder.cpp src/assets/TinyrendererAdapter.cpp src/assets/AssetLoader.cpp src/render/AssetInstall.cpp src/editor/EditorScene.cpp src/editor/commands/CommandHistory.cpp)
 target_include_directories(demo_core PUBLIC "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(demo_core PUBLIC Qt5::Widgets lqtexec::lqtexec lr::render lr::scene EnTT::EnTT)
 target_compile_features(demo_core PUBLIC cxx_std_20)
@@ -95,7 +95,7 @@ add_executable(lrender_demo src/app/main.cpp)
 target_link_libraries(lrender_demo PRIVATE demo_ui)
 
 target_sources(demo_tests PRIVATE tests/shutdown_test.cpp)
-target_sources(demo_tests PRIVATE tests/workflow_test.cpp tests/editor_scene_test.cpp)
+target_sources(demo_tests PRIVATE tests/workflow_test.cpp tests/editor_scene_test.cpp tests/undo_test.cpp)
 
 target_sources(demo_core PRIVATE src/app/ApplicationLifetime.cpp)
 

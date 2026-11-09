@@ -1,0 +1,227 @@
+#include "editor/commands/CommandHistory.h"
+#include "editor/EditorScene.h"
+#include "support/EditorWorldInvariant.h"
+
+#include <doctest/doctest.h>
+#include <lr/core/Primitives.h>
+#include <lr/scene/World.h>
+
+#include <random>
+#include <vector>
+
+using demo::editor::CommandHistory;
+using demo::editor::EditorScene;
+using demo::editor::LocalTransform;
+using demo::editor::MeshRef;
+using demo::editor::MaterialRef;
+using demo::editor::Name;
+using demo::test::nearTransform;
+
+namespace {
+
+struct XfSnap {
+  entt::entity e{};
+  lr::core::Transform xf{};
+  lr::core::MeshId mesh{};
+  lr::core::MaterialId mat{};
+  bool hasMesh = false;
+};
+
+std::vector<XfSnap> capture(EditorScene const &s) {
+  std::vector<XfSnap> out;
+  for (auto e : s.registry().view<Name>()) {
+    XfSnap snap;
+    snap.e = e;
+    snap.xf = s.registry().get<LocalTransform>(e).value;
+    if (auto const *m = s.registry().try_get<MeshRef>(e)) {
+      snap.mesh = m->id;
+      snap.hasMesh = true;
+    }
+    if (auto const *m = s.registry().try_get<MaterialRef>(e))
+      snap.mat = m->id;
+    out.push_back(snap);
+  }
+  return out;
+}
+
+void requireSame(std::vector<XfSnap> const &a, std::vector<XfSnap> const &b) {
+  REQUIRE(a.size() == b.size());
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    REQUIRE(a[i].e == b[i].e);
+    CHECK(nearTransform(a[i].xf, b[i].xf));
+    CHECK(a[i].hasMesh == b[i].hasMesh);
+    if (a[i].hasMesh) {
+      CHECK(a[i].mesh == b[i].mesh);
+      CHECK(a[i].mat == b[i].mat);
+    }
+  }
+}
+
+} // namespace
+
+TEST_CASE("undo/transform-roundtrip") {
+  EditorScene scene;
+  auto w = lr::scene::makeWorld({});
+  auto e = scene.create("a", {});
+  CommandHistory hist;
+  lr::core::Transform after{};
+  after.translation = {1.f, 2.f, 3.f};
+  hist.executeTransform(scene, e, after);
+  CHECK(nearTransform(scene.registry().get<LocalTransform>(e).value, after));
+  CHECK(hist.canUndo());
+  CHECK_FALSE(hist.canRedo());
+  hist.undo(scene);
+  CHECK(nearTransform(scene.registry().get<LocalTransform>(e).value,
+                      lr::core::Transform::identity()));
+  CHECK(hist.canRedo());
+  hist.redo(scene);
+  CHECK(nearTransform(scene.registry().get<LocalTransform>(e).value, after));
+  scene.syncToWorld(*w);
+  demo::test::assertEditorWorldConsistent(scene, *w);
+}
+
+TEST_CASE("undo/material-roundtrip") {
+  EditorScene scene;
+  auto w = lr::scene::makeWorld({});
+  auto meshA = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+  auto meshB = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({2, 2})));
+  auto matA = w->resources().addMaterial({});
+  auto matB = w->resources().addMaterial({});
+  auto e = scene.create("m", {});
+  scene.setMeshMaterial(e, meshA, matA);
+  scene.syncToWorld(*w); // clear Dirty from setup
+  CommandHistory hist;
+  hist.executeMaterial(scene, e, meshB, matB);
+  CHECK(scene.registry().get<MeshRef>(e).id == meshB);
+  CHECK(scene.registry().get<MaterialRef>(e).id == matB);
+  hist.undo(scene);
+  CHECK(scene.registry().get<MeshRef>(e).id == meshA);
+  CHECK(scene.registry().get<MaterialRef>(e).id == matA);
+  hist.redo(scene);
+  CHECK(scene.registry().get<MeshRef>(e).id == meshB);
+  scene.syncToWorld(*w);
+  demo::test::assertEditorWorldConsistent(scene, *w);
+}
+
+TEST_CASE("undo/merge-coalesces-transform-drag") {
+  EditorScene scene;
+  auto e = scene.create("drag", {});
+  CommandHistory hist;
+  hist.beginMerge();
+  for (int i = 1; i <= 5; ++i) {
+    lr::core::Transform xf{};
+    xf.translation = {float(i), 0.f, 0.f};
+    hist.executeTransform(scene, e, xf);
+  }
+  hist.endMerge();
+  CHECK(hist.undoDepth() == 1);
+  CHECK(scene.registry().get<LocalTransform>(e).value.translation.x == doctest::Approx(5.f));
+  hist.undo(scene);
+  CHECK(scene.registry().get<LocalTransform>(e).value.translation.x == doctest::Approx(0.f));
+  hist.redo(scene);
+  CHECK(scene.registry().get<LocalTransform>(e).value.translation.x == doctest::Approx(5.f));
+}
+
+TEST_CASE("undo/skips-deleted-entity") {
+  EditorScene scene;
+  auto a = scene.create("a", {});
+  auto b = scene.create("b", {});
+  CommandHistory hist;
+  lr::core::Transform xa{};
+  xa.translation = {4.f, 0.f, 0.f};
+  hist.executeTransform(scene, a, xa);
+  lr::core::Transform xb{};
+  xb.translation = {7.f, 0.f, 0.f};
+  hist.executeTransform(scene, b, xb);
+  scene.destroy(a);
+  // Undo b first (top), then a (stale) — must not crash; b restored, a skipped.
+  hist.undo(scene);
+  CHECK(nearTransform(scene.registry().get<LocalTransform>(b).value,
+                      lr::core::Transform::identity()));
+  CHECK_NOTHROW(hist.undo(scene));
+  CHECK(hist.undoDepth() == 0);
+  CHECK(hist.canRedo());
+}
+
+TEST_CASE("undo/clear-discards-stack") {
+  EditorScene scene;
+  auto e = scene.create("c", {});
+  CommandHistory hist;
+  lr::core::Transform xf{};
+  xf.translation = {1.f, 0.f, 0.f};
+  hist.executeTransform(scene, e, xf);
+  hist.undo(scene);
+  CHECK(hist.canRedo());
+  hist.clear();
+  CHECK_FALSE(hist.canUndo());
+  CHECK_FALSE(hist.canRedo());
+  // Entity state unchanged by clear.
+  CHECK(nearTransform(scene.registry().get<LocalTransform>(e).value,
+                      lr::core::Transform::identity()));
+}
+
+TEST_CASE("undo/new-command-clears-redo") {
+  EditorScene scene;
+  auto e = scene.create("n", {});
+  CommandHistory hist;
+  lr::core::Transform a{};
+  a.translation = {1.f, 0.f, 0.f};
+  hist.executeTransform(scene, e, a);
+  hist.undo(scene);
+  REQUIRE(hist.canRedo());
+  lr::core::Transform b{};
+  b.translation = {2.f, 0.f, 0.f};
+  hist.executeTransform(scene, e, b);
+  CHECK_FALSE(hist.canRedo());
+  CHECK(hist.undoDepth() == 1);
+}
+
+TEST_CASE("undo/random-transform-material-roundtrip") {
+  // Arbitrary transform/material sequences: full undo returns to initial; full
+  // redo returns to end state. Create/destroy/reparent are outside undo scope.
+  for (std::uint32_t seed : {1u, 7u, 42u, 99u, 1234u}) {
+    std::mt19937 rng(seed);
+    EditorScene scene;
+    auto w = lr::scene::makeWorld({});
+    auto mesh0 = w->resources().addMesh(
+        std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+    auto mesh1 = w->resources().addMesh(
+        std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+    auto mat0 = w->resources().addMaterial({});
+    auto mat1 = w->resources().addMaterial({});
+    std::vector<entt::entity> ents;
+    for (int i = 0; i < 4; ++i) {
+      auto e = scene.create("e" + std::to_string(i), {});
+      scene.setMeshMaterial(e, mesh0, mat0);
+      ents.push_back(e);
+    }
+    scene.syncToWorld(*w);
+    auto initial = capture(scene);
+    CommandHistory hist;
+    int steps = 40;
+    for (int step = 0; step < steps; ++step) {
+      auto e = ents[std::uniform_int_distribution<std::size_t>(0, ents.size() - 1)(rng)];
+      if (std::uniform_int_distribution<int>(0, 1)(rng) == 0) {
+        lr::core::Transform xf = scene.registry().get<LocalTransform>(e).value;
+        xf.translation.x = float((step * 3 + int(seed)) % 19);
+        xf.translation.y = float((step + int(seed)) % 7);
+        hist.executeTransform(scene, e, xf);
+      } else {
+        bool useB = std::uniform_int_distribution<int>(0, 1)(rng) == 1;
+        hist.executeMaterial(scene, e, useB ? mesh1 : mesh0, useB ? mat1 : mat0);
+      }
+    }
+    auto finalState = capture(scene);
+    REQUIRE(hist.undoDepth() == static_cast<std::size_t>(steps));
+    while (hist.canUndo())
+      hist.undo(scene);
+    requireSame(capture(scene), initial);
+    while (hist.canRedo())
+      hist.redo(scene);
+    requireSame(capture(scene), finalState);
+    scene.syncToWorld(*w);
+    demo::test::assertEditorWorldConsistent(scene, *w);
+  }
+}

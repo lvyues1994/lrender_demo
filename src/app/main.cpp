@@ -249,6 +249,20 @@ struct Viewer : QObject {
       if (session)
         session->invalidatePresentation(e);
     };
+    commands.undo = [&] {
+      if (session)
+        session->undo();
+    };
+    commands.redo = [&] {
+      if (session)
+        session->redo();
+    };
+    commands.canUndo = [&] {
+      return session && session->canUndo();
+    };
+    commands.canRedo = [&] {
+      return session && session->canRedo();
+    };
     commands.stop = [this] { requestStop(); };
     window = std::make_unique<MainWindow>(commands);
     if (!test.empty())

@@ -1,4 +1,8 @@
 #include "MainWindow.h"
+#include <QAction>
+#include <QKeySequence>
+#include <QMenu>
+#include <QMenuBar>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -118,6 +122,28 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
   setCentralWidget(central);
   resize(720, 560);
   setWindowTitle("lrender · Qt Vulkan viewer");
+  // E3 Edit menu: custom CommandHistory behind session (not QUndoStack) — see CommandHistory.h.
+  {
+    auto *edit = menuBar()->addMenu(tr("&Edit"));
+    undoAction_ = edit->addAction(tr("&Undo"));
+    undoAction_->setObjectName("actionUndo");
+    undoAction_->setShortcut(QKeySequence::Undo); // Ctrl+Z
+    redoAction_ = edit->addAction(tr("&Redo"));
+    redoAction_->setObjectName("actionRedo");
+    // Ctrl+Shift+Z primary; Ctrl+Y also common on Windows-style bindings.
+    redoAction_->setShortcuts({QKeySequence::Redo, QKeySequence(tr("Ctrl+Y"))});
+    connect(undoAction_, &QAction::triggered, this, [this] {
+      if (commands_.undo)
+        commands_.undo();
+      refreshEditActions();
+    });
+    connect(redoAction_, &QAction::triggered, this, [this] {
+      if (commands_.redo)
+        commands_.redo();
+      refreshEditActions();
+    });
+    refreshEditActions();
+  }
   connect(model_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
           [this](int) {
             if (commands_.model)
@@ -160,6 +186,7 @@ void MainWindow::restoreAppearance() {
 void MainWindow::showSnapshot(SessionSnapshotPtr s) {
   lastSnapshot_ = s;
   restoreAppearance();
+  refreshEditActions();
   QSignalBlocker a(model_), b(pipeline_), c(exposure_), d(taa_);
   if (s->model)
     model_->setCurrentText(QString::fromStdString(s->model->value));
@@ -230,5 +257,12 @@ void MainWindow::closeEvent(QCloseEvent *e) {
     if (commands_.stop)
       commands_.stop();
   }
+}
+
+void MainWindow::refreshEditActions() {
+  if (undoAction_)
+    undoAction_->setEnabled(commands_.canUndo ? commands_.canUndo() : false);
+  if (redoAction_)
+    redoAction_->setEnabled(commands_.canRedo ? commands_.canRedo() : false);
 }
 } // namespace demo

@@ -1,6 +1,7 @@
 #pragma once
 #include "ViewportHost.h"
 #include <QMainWindow>
+class QAction;
 class QComboBox;
 class QDoubleSpinBox;
 class QCheckBox;
@@ -28,5 +29,8 @@ private:
   SessionSnapshotPtr lastSnapshot_;
   std::optional<bool> normalAcknowledgement_;
   void restoreAppearance();
+  void refreshEditActions();
+  QAction *undoAction_ = nullptr;
+  QAction *redoAction_ = nullptr;
 };
 } // namespace demo

@@ -1451,3 +1451,87 @@ TEST_CASE("session/session-two-valid-reparents-same-frame") {
   stop(*s, h);
 }
 
+
+
+TEST_CASE("session/editor-undo-transform-roundtrip") {
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  auto id = s->createEditorEntity("u", {});
+  lr::core::Transform xf{};
+  xf.translation = {3.f, 0.f, 0.f};
+  s->setEntityTransform(id, xf);
+  REQUIRE(s->canUndo());
+  CHECK_FALSE(s->canRedo());
+  s->undo();
+  {
+    auto snap = s->snapshot();
+    for (auto const &e : snap->entities)
+      if (e.id == id)
+        CHECK(e.local.translation.x == doctest::Approx(0.f));
+  }
+  REQUIRE(s->canRedo());
+  s->redo();
+  {
+    auto snap = s->snapshot();
+    for (auto const &e : snap->entities)
+      if (e.id == id)
+        CHECK(e.local.translation.x == doctest::Approx(3.f));
+  }
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+}
+
+TEST_CASE("session/editor-undo-merge-then-undo-once") {
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  auto id = s->createEditorEntity("drag", {});
+  s->beginEditMerge();
+  for (int i = 1; i <= 4; ++i) {
+    lr::core::Transform xf{};
+    xf.translation = {float(i), 0.f, 0.f};
+    s->setEntityTransform(id, xf);
+  }
+  s->endEditMerge();
+  // One coalesced command — single undo restores identity.
+  s->undo();
+  {
+    auto snap = s->snapshot();
+    for (auto const &e : snap->entities)
+      if (e.id == id)
+        CHECK(e.local.translation.x == doctest::Approx(0.f));
+  }
+  CHECK_FALSE(s->canUndo());
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+}
+
+TEST_CASE("session/editor-undo-cleared-on-model-commit") {
+  // Commit path adoptInstalledIntoEditor clears CommandHistory (A1.2).
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  auto id = s->createEditorEntity("pre", {});
+  lr::core::Transform xf{};
+  xf.translation = {2.f, 0.f, 0.f};
+  s->setEntityTransform(id, xf);
+  REQUIRE(s->canUndo());
+  // Selecting an unknown model fails without commit — history must remain.
+  s->selectModel({"not-a-real-model"});
+  CHECK(s->canUndo());
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+}

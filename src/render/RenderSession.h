@@ -53,6 +53,16 @@ public:
   void setEntityMeshMaterial(EditorEntityId, lr::core::MeshId, lr::core::MaterialId);
   void destroyEntity(EditorEntityId);
 
+  // --- E3 Undo/Redo (TRS + Mesh/Material refs only; GUI thread) ---
+  // Custom CommandHistory (not QUndoStack): domain testable without Widgets,
+  // beginMerge/endMerge coalesce for E5 gizmo, stale ids skip safely.
+  void undo();
+  void redo();
+  bool canUndo() const;
+  bool canRedo() const;
+  void beginEditMerge(); // E5 gizmo drag / continuous slider
+  void endEditMerge();
+
 private:
   struct Impl;
   std::shared_ptr<Impl> impl_;

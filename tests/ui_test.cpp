@@ -1,5 +1,7 @@
 #include "presentation/ReadbackAdapter.h"
 #include "ui/MainWindow.h"
+#include <QAction>
+#include <QKeySequence>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -448,4 +450,30 @@ TEST_CASE("ui/p10-fix-arrows-wheel-rejection-and-normal-acknowledgement") {
   REQUIRE(test::until([&] { return publications == 7; }));
   CHECK(spin->value() == doctest::Approx(.65));
   CHECK(commands == 7);
+}
+
+
+TEST_CASE("ui/edit-menu-undo-redo-actions") {
+  unsigned undos = 0, redos = 0;
+  bool canU = true, canR = false;
+  UiCommands c;
+  c.undo = [&] { ++undos; canU = false; canR = true; };
+  c.redo = [&] { ++redos; canR = false; canU = true; };
+  c.canUndo = [&] { return canU; };
+  c.canRedo = [&] { return canR; };
+  MainWindow window(c);
+  auto *undo = window.findChild<QAction *>("actionUndo");
+  auto *redo = window.findChild<QAction *>("actionRedo");
+  REQUIRE(undo);
+  REQUIRE(redo);
+  CHECK(undo->isEnabled());
+  CHECK_FALSE(redo->isEnabled());
+  CHECK(undo->shortcut() == QKeySequence::Undo);
+  undo->trigger();
+  CHECK(undos == 1);
+  window.showSnapshot(std::make_shared<SessionSnapshot const>());
+  CHECK_FALSE(undo->isEnabled());
+  CHECK(redo->isEnabled());
+  redo->trigger();
+  CHECK(redos == 1);
 }

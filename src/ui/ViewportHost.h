@@ -16,6 +16,11 @@ struct UiCommands {
   std::function<float(float)> ambient, roughness;
   std::function<bool(bool)> normalMapping;
   std::function<void(RenderError)> invalidated;
+  // E3: Edit menu / Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y). Domain history lives in session.
+  std::function<void()> undo;
+  std::function<void()> redo;
+  std::function<bool()> canUndo;
+  std::function<bool()> canRedo;
 };
 class ViewportHost : public QWidget {
 public:

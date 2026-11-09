@@ -1545,3 +1545,32 @@ TEST_CASE(
   life.onRootJoined();
   life.assertSafeDestruction();
 }
+
+
+TEST_CASE("asset_async/model-commit-clears-undo-history") {
+  // A1.2: model commit (adoptInstalledIntoEditor) clears CommandHistory.
+  App app([](auto const &e, auto) -> Result<CpuAssetPtr> {
+    return fixture(e.id.value, 2);
+  });
+  auto r = resources(app);
+  Harness h;
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), h.events());
+  session.setAssetLoader(*app.loader);
+  start(session);
+  auto id = session.createEditorEntity("pre-commit", {});
+  lr::core::Transform xf{};
+  xf.translation = {5.f, 0.f, 0.f};
+  session.setEntityTransform(id, xf);
+  REQUIRE(session.canUndo());
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel.has_value() &&
+           session.snapshot()->installedModel->value == "african_head";
+  }));
+  CHECK_FALSE(session.canUndo());
+  CHECK_FALSE(session.canRedo());
+  stop(session, h);
+}
