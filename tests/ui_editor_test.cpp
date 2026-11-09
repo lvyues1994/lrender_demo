@@ -395,3 +395,175 @@ TEST_CASE("ui_editor/property-panel-focusout-refills-from-snapshot") {
   CHECK(got->roughness == doctest::Approx(0.15f));
   (void)rough;
 }
+
+TEST_CASE("ui_editor/property-panel-focusout-commits-typed-after-stale-snapshot") {
+  // N1: FocusOut refill must not run before QAbstractSpinBox commits the editor.
+  // Repro: focus TX → stale snap x=7 (skipped) → type 12.5 → blur to TY without Enter
+  // → must emit one transform with x=12.5 and show 12.5 (not revert to 7).
+  REQUIRE(QApplication::instance());
+  int transforms = 0;
+  std::optional<float> lastX;
+  demo::PropertyCommands cmd;
+  cmd.setTransform = [&](EditorEntityId, lr::core::Transform xf) {
+    ++transforms;
+    lastX = xf.translation.x;
+  };
+  demo::PropertyPanel panel(cmd);
+  panel.setWindowFlags(Qt::Window);
+  panel.show();
+  QApplication::setActiveWindow(&panel);
+  QCoreApplication::processEvents();
+  SelectionState sel;
+  EditorEntityId id{7};
+  sel.setPrimary(id);
+  auto makeSnap = [&](float x) {
+    auto snap = std::make_shared<SessionSnapshot>();
+    EditorEntitySnapshot ent;
+    ent.id = id;
+    ent.name = "n";
+    ent.local.translation = {x, 0.f, 0.f};
+    snap->entities.push_back(ent);
+    return snap;
+  };
+  panel.showSnapshot(makeSnap(0.f), sel);
+  auto spins = panel.findChildren<QDoubleSpinBox *>();
+  REQUIRE(spins.size() >= 2);
+  auto *tx = spins[0];
+  auto *ty = spins[1];
+  tx->setFocus(Qt::OtherFocusReason);
+  QCoreApplication::processEvents();
+  // Stale external value while focused (undo / other edit).
+  panel.showSnapshot(makeSnap(7.f), sel);
+  auto *le = tx->findChild<QLineEdit *>();
+  REQUIRE(le);
+  le->setText(QStringLiteral("12.5"));
+  CHECK(le->text() == QStringLiteral("12.5"));
+  transforms = 0;
+  lastX.reset();
+  // Blur by focusing another spin — no Enter.
+  ty->setFocus(Qt::TabFocusReason);
+  QCoreApplication::processEvents();
+  CHECK(transforms == 1);
+  REQUIRE(lastX.has_value());
+  CHECK(*lastX == doctest::Approx(12.5f));
+  CHECK(tx->value() == doctest::Approx(12.5));
+}
+
+TEST_CASE("ui_editor/property-panel-no-focus-skip-mutation-guard") {
+  // Minor noFocusSkip: while focused, showSnapshot must leave line-edit text alone.
+  REQUIRE(QApplication::instance());
+  demo::PropertyCommands cmd;
+  demo::PropertyPanel panel(cmd);
+  panel.setWindowFlags(Qt::Window);
+  panel.show();
+  QApplication::setActiveWindow(&panel);
+  QCoreApplication::processEvents();
+  SelectionState sel;
+  EditorEntityId id{1};
+  sel.setPrimary(id);
+  auto snap = std::make_shared<SessionSnapshot>();
+  EditorEntitySnapshot ent;
+  ent.id = id;
+  ent.name = "n";
+  ent.local.translation = {1.f, 0.f, 0.f};
+  snap->entities.push_back(ent);
+  panel.showSnapshot(snap, sel);
+  auto *tx = panel.findChildren<QDoubleSpinBox *>().at(0);
+  tx->setFocus(Qt::OtherFocusReason);
+  QCoreApplication::processEvents();
+  auto *le = tx->findChild<QLineEdit *>();
+  REQUIRE(le);
+  le->setText(QStringLiteral("12.5"));
+  // Even if offscreen refuses real focus, drive the hasFocus path via FocusIn event
+  // and still assert text retention when hasFocus is true.
+  if (!tx->hasFocus()) {
+    QFocusEvent in(QEvent::FocusIn, Qt::OtherFocusReason);
+    QCoreApplication::sendEvent(tx, &in);
+  }
+  ent.local.translation.x = 7.f;
+  snap = std::make_shared<SessionSnapshot>();
+  snap->entities.push_back(ent);
+  panel.showSnapshot(snap, sel);
+  if (tx->hasFocus()) {
+    CHECK(le->text() == QStringLiteral("12.5"));
+    CHECK(tx->text() == QStringLiteral("12.5"));
+  } else {
+    // Offscreen fallback: setSpinValue nearlyEqual / syncing must not emit.
+    int changes = 0;
+    QObject::connect(tx, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                     [&](double) { ++changes; });
+    panel.showSnapshot(snap, sel);
+    CHECK(changes == 0);
+  }
+}
+
+TEST_CASE("ui_editor/property-panel-no-base-seed-mutation-guard") {
+  // Minor noBaseSeed: emitMaterial seeds textures from materialBase / override.
+  REQUIRE(QApplication::instance());
+  std::optional<lr::core::MaterialDesc> got;
+  demo::PropertyCommands cmd;
+  cmd.setMaterialDesc = [&](EditorEntityId, lr::core::MaterialDesc d) { got = d; };
+  demo::PropertyPanel panel(cmd);
+  SelectionState sel;
+  EditorEntityId id{3};
+  sel.setPrimary(id);
+  auto snap = std::make_shared<SessionSnapshot>();
+  EditorEntitySnapshot ent;
+  ent.id = id;
+  ent.name = "m";
+  lr::core::MaterialDesc base{};
+  base.roughness = 0.4f;
+  base.metallic = 0.2f;
+  base.baseColorTexture = lr::core::TextureId{11};
+  base.normalTexture = lr::core::TextureId{12};
+  base.metallicRoughnessTexture = lr::core::TextureId{13};
+  ent.materialBase = base;
+  ent.material = lr::core::MaterialId{9};
+  snap->entities.push_back(ent);
+  panel.showSnapshot(snap, sel);
+  auto spins = panel.findChildren<QDoubleSpinBox *>();
+  REQUIRE(spins.size() >= 8);
+  spins[6]->setValue(0.33); // roughness only
+  REQUIRE(got.has_value());
+  CHECK(got->roughness == doctest::Approx(0.33f));
+  CHECK(got->metallic == doctest::Approx(0.2f));
+  REQUIRE(got->baseColorTexture.has_value());
+  REQUIRE(got->normalTexture.has_value());
+  REQUIRE(got->metallicRoughnessTexture.has_value());
+  CHECK(got->baseColorTexture->value == 11);
+  CHECK(got->normalTexture->value == 12);
+  CHECK(got->metallicRoughnessTexture->value == 13);
+}
+
+TEST_CASE("ui_editor/property-panel-no-refill-mutation-guard") {
+  // Minor noRefill: external change while focused, user types nothing; FocusOut shows real value.
+  REQUIRE(QApplication::instance());
+  demo::PropertyCommands cmd;
+  demo::PropertyPanel panel(cmd);
+  panel.setWindowFlags(Qt::Window);
+  panel.show();
+  QApplication::setActiveWindow(&panel);
+  QCoreApplication::processEvents();
+  SelectionState sel;
+  EditorEntityId id{5};
+  sel.setPrimary(id);
+  auto makeSnap = [&](float x) {
+    auto snap = std::make_shared<SessionSnapshot>();
+    EditorEntitySnapshot ent;
+    ent.id = id;
+    ent.name = "n";
+    ent.local.translation = {x, 0.f, 0.f};
+    snap->entities.push_back(ent);
+    return snap;
+  };
+  panel.showSnapshot(makeSnap(1.f), sel);
+  auto spins = panel.findChildren<QDoubleSpinBox *>();
+  auto *tx = spins[0];
+  auto *ty = spins[1];
+  tx->setFocus(Qt::OtherFocusReason);
+  QCoreApplication::processEvents();
+  panel.showSnapshot(makeSnap(9.f), sel); // skipped into widgets, stored as lastSnap_
+  ty->setFocus(Qt::TabFocusReason);
+  QCoreApplication::processEvents();
+  CHECK(tx->value() == doctest::Approx(9.0));
+}

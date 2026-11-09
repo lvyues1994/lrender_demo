@@ -3,6 +3,7 @@
 #include <QDoubleSpinBox>
 #include <QEvent>
 #include <QPointer>
+#include <QTimer>
 #include <QFormLayout>
 #include <QLabel>
 #include <QVBoxLayout>
@@ -100,6 +101,31 @@ void PropertyPanel::silenceSpins() {
   }
 }
 
+
+void PropertyPanel::publishLocalEntToSnap() {
+  // Keep lastSnap_ aligned with commits so a deferred FocusOut refill does not
+  // revert the just-committed spin value back to a stale external snapshot.
+  if (!lastSnap_ || !lastEnt_ || !current_.isValid())
+    return;
+  auto copy = std::make_shared<SessionSnapshot>(*lastSnap_);
+  for (auto &e : copy->entities) {
+    if (e.id == current_) {
+      e = *lastEnt_;
+      break;
+    }
+  }
+  lastSnap_ = std::move(copy);
+}
+
+void PropertyPanel::scheduleFocusOutRefill() {
+  QPointer<PropertyPanel> self(this);
+  QTimer::singleShot(0, this, [self] {
+    if (!self || self->dying_ || !self->lastSnap_)
+      return;
+    self->showSnapshot(self->lastSnap_, self->lastSelection_);
+  });
+}
+
 PropertyPanel::~PropertyPanel() {
   // I-B: ~QWidget may FocusOut → valueChanged while members are already torn down.
   dying_ = true;
@@ -125,9 +151,8 @@ bool PropertyPanel::eventFilter(QObject *watched, QEvent *event) {
     } else if (event->type() == QEvent::FocusOut) {
       if (commands_.endEditMerge)
         commands_.endEditMerge();
-      // Minor1: refill from latest snapshot after blur (e.g. undo while focused).
-      if (lastSnap_)
-        showSnapshot(lastSnap_, lastSelection_);
+      // N1: defer refill until after QAbstractSpinBox::focusOutEvent commits the editor.
+      scheduleFocusOutRefill();
     }
   }
   return QWidget::eventFilter(watched, event);
@@ -219,6 +244,7 @@ void PropertyPanel::emitTransform() {
               static_cast<float>(sz_->value())};
   if (lastEnt_)
     lastEnt_->local = xf;
+  publishLocalEntToSnap();
   commands_.setTransform(current_, xf);
 }
 
@@ -235,6 +261,7 @@ void PropertyPanel::emitMaterial() {
   desc.metallic = static_cast<float>(metallic_->value());
   if (lastEnt_)
     lastEnt_->materialOverride = desc;
+  publishLocalEntToSnap();
   commands_.setMaterialDesc(current_, desc);
 }
 
@@ -264,6 +291,7 @@ void PropertyPanel::emitLight() {
   }
   if (lastEnt_)
     lastEnt_->light = light;
+  publishLocalEntToSnap();
   commands_.setLight(current_, light);
 }
 
@@ -278,6 +306,7 @@ void PropertyPanel::emitCamera() {
   lens.farPlane = static_cast<float>(far_->value());
   if (lastEnt_)
     lastEnt_->camera = lens;
+  publishLocalEntToSnap();
   commands_.setCamera(current_, lens);
 }
 

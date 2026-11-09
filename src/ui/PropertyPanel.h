@@ -61,6 +61,8 @@ private:
   void wireSpin(QDoubleSpinBox *s, std::function<void()> fn);
   void setSpinValue(QDoubleSpinBox *s, double v);
   void silenceSpins();
+  void publishLocalEntToSnap();
+  void scheduleFocusOutRefill();
   std::vector<QDoubleSpinBox *> allSpins() const;
   std::optional<EditorEntitySnapshot> findEntity(SessionSnapshotPtr const &snap,
                                                  EditorEntityId id) const;
