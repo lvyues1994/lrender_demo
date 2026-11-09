@@ -248,6 +248,8 @@ void VulkanSharedAdapter::setFrameContext(SessionGeneration gen,
   s->generation = gen;
   if (s->path == PresentationPath::Readback)
     s->readback.setFrameContext(gen, v);
+  else if (v.physical.x > 0 && v.physical.y > 0)
+    s->extent = v.physical; // soft resize uses live host physical/WSI extent
 }
 void VulkanSharedAdapter::consumeImage(OwnedFrame f) {
   impl_->owner();

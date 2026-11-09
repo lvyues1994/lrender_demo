@@ -67,7 +67,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   double receiptWaitMs = 0;
   std::optional<RenderError> lastError;
   bool started = false, stopRequested = false, faulted = false, unknownAcceptance = false, rebuild = false,
-       targetFresh = false;
+       hardRebuild = false, pathPrepared = false, targetFresh = false;
   bool tickQueued = false, noticeQueued = false, resourcesGone = false;
   SessionGeneration candidateGeneration = 0;
   PresentationPath selectedPath = PresentationPath::Readback;
@@ -220,6 +220,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       presentationWarnings.push_back(error.message + ": " + error.cause);
       selectedPath = PresentationPath::Readback;
       state.presentationInvalidated(error);
+      hardRebuild = true;
       rebuild = true;
       publish();
       queueTick(); // old path must drain/release before readback prepare
@@ -289,6 +290,8 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
                 s.targetFresh = true;
                 s.performance.accumulatedSamples = 0;
                 s.rebuild = false;
+                s.hardRebuild = false;
+                s.pathPrepared = true;
                 s.pump.markDirty();
                 s.queueTick();
                 s.publish();
@@ -298,6 +301,72 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
             });
           });
         }));
+  }
+  bool bindFreshTarget() {
+    if (stopRequested || !area() || !visible || !pathPrepared)
+      return false;
+    candidateGeneration = state.snapshot()->generation;
+    auto resolved = adapter->resolvedViewport(state.viewport());
+    auto old = state.viewport();
+    if (resolved.physical.x != old.physical.x || resolved.physical.y != old.physical.y)
+      state.setViewport(resolved);
+    candidateGeneration = state.snapshot()->generation;
+    auto desc = adapter->describeTarget(state.viewport());
+    if (auto image = std::get_if<lr::render::ImageTargetDesc>(&desc))
+      target = resources.renderer->targets().createImage(*image);
+    else
+      target = resources.renderer->targets().createWindow(std::get<lr::render::WindowTargetDesc>(desc));
+    adapter->setFrameContext(candidateGeneration, state.viewport());
+    if (!state.presentationReady(candidateGeneration, selectedPath,
+                                 resources.renderer->deviceInfo().backend,
+                                 resources.renderer->deviceInfo().deviceName))
+      throw std::runtime_error("stale soft presentation candidate");
+    targetFresh = true;
+    performance.accumulatedSamples = 0;
+    pump.markDirty();
+    return true;
+  }
+  void softRecreateTarget() {
+    // Keep host/presenter (or readback path) alive so the last swapchain/image remains
+    // visible until the replacement target presents. Hard teardown still used for native
+    // loss, path changes, and final shutdown.
+    if (!pathPrepared || phase != Ready) {
+      hardRebuild = true;
+      beginDrain();
+      return;
+    }
+    auto finish = [this] {
+      try {
+        destroyTarget();
+        rebuild = false;
+        if (bindFreshTarget()) {
+          phase = Ready;
+          queueTick();
+          publish();
+          return;
+        }
+        phase = Ready;
+        queueTick();
+        publish();
+      } catch (std::exception const &e) {
+        hardRebuild = true;
+        rebuild = true;
+        presentationError(issue(ErrorStage::Surface, "soft target rebuild failed", e.what()));
+      }
+    };
+    if (selectedPath == PresentationPath::VulkanShared) {
+      phase = Draining;
+      adapter->beginDrain(control([finish](Impl &s, auto result) {
+        if (auto e = std::get_if<RenderError>(&result)) {
+          s.phase = DrainFailed;
+          s.report(*e);
+          return;
+        }
+        finish();
+      }));
+      return;
+    }
+    finish();
   }
   void destroyTarget() {
     if (target) {
@@ -339,6 +408,8 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
         }
         s.phase = Idle;
         s.rebuild = false;
+        s.hardRebuild = false;
+        s.pathPrepared = false;
         if (s.stopRequested) {
           if (s.resourcesGone)
             s.finishScopes();
@@ -497,14 +568,24 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       return;
     if (installStep())
       return;
-    if (rebuild) {
-      if (pump.inFlight() == 0)
-        beginDrain();
+    if (rebuild || hardRebuild) {
+      if (pump.inFlight() == 0) {
+        if (rebuild && !hardRebuild && pathPrepared && phase == Ready && !stopRequested)
+          softRecreateTarget();
+        else
+          beginDrain();
+      }
       return;
     }
     if (phase == Idle) {
       if (started && area() && visible)
         prepare();
+      return;
+    }
+    if (phase == Ready && pathPrepared && !target && started && area() && visible && !rebuild &&
+        !hardRebuild) {
+      rebuild = true;
+      queueTick();
       return;
     }
     pump.setPaused(!state.canSubmit());
@@ -757,6 +838,8 @@ void RenderSession::setVisible(bool visible) {
   s.state.setVisible(visible);
   if (!visible)
     s.rebuild = true;
+  else if (!s.target && s.pathPrepared)
+    s.rebuild = true;
   s.pump.markDirty();
   s.queueTick();
   s.publish();
@@ -767,6 +850,7 @@ void RenderSession::invalidatePresentation(RenderError error) {
   if (s.blocked())
     return;
   s.state.presentationInvalidated(error);
+  s.hardRebuild = true;
   s.rebuild = true;
   s.pump.markDirty();
   s.queueTick();

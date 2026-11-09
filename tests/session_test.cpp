@@ -1098,3 +1098,46 @@ TEST_CASE(
   CHECK(h.jobs.size() == 2);
   CHECK(s.snapshot()->life == LifeState::Stopped);
 }
+
+TEST_CASE("session/soft-rebuild-resize-pipeline-keeps-path-without-release") {
+  Harness h;
+  std::vector<std::string> stages;
+  auto adapter = std::make_unique<ReadbackAdapter>(h.imageEvents(), [&](auto stage, Done done) {
+    stages.push_back(stage);
+    done(std::monostate{});
+  });
+  auto r = resources();
+  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world), std::move(adapter),
+                  h.submit(), h.events());
+  start(s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() == 1; }));
+  CHECK(stages == std::vector<std::string>{"prepare"});
+  auto firstTarget = h.jobs[0].frame.views[0].target;
+  auto generation = s.snapshot()->generation;
+  h.complete(0);
+  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
+
+  s.setViewport({{9, 8}, {9, 8}, 1});
+  REQUIRE(test::until([&] { return h.jobs.size() == 2; }));
+  CHECK(s.snapshot()->generation > generation);
+  CHECK(h.jobs[1].frame.views[0].target != firstTarget);
+  // Soft rebuild may flush/drain, but must not tear down the presentation path.
+  CHECK(std::count(stages.begin(), stages.end(), "release") == 0);
+  CHECK(std::count(stages.begin(), stages.end(), "prepare") == 1);
+  h.complete(1);
+  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
+
+  generation = s.snapshot()->generation;
+  auto secondTarget = h.jobs[1].frame.views[0].target;
+  RenderOptions options;
+  options.pipeline = PipelineKind::Pathtrace;
+  s.setRenderOptions(options);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 3; }));
+  CHECK(s.snapshot()->generation > generation);
+  CHECK(h.jobs[2].frame.views[0].target != secondTarget);
+  CHECK(std::count(stages.begin(), stages.end(), "release") == 0);
+  CHECK(std::count(stages.begin(), stages.end(), "prepare") == 1);
+  for (std::size_t i = 2; i < h.jobs.size(); ++i) h.complete(i);
+  stop(s, h);
+  CHECK(std::count(stages.begin(), stages.end(), "release") == 1);
+}

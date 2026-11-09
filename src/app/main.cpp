@@ -9,6 +9,7 @@
 #include "ui/MainWindow.h"
 #include <QApplication>
 #include <QCheckBox>
+#include <QColor>
 #include <QComboBox>
 #include <QCommandLineParser>
 #include <QDir>
@@ -77,6 +78,85 @@ struct Viewer : QObject {
   QTimer heartbeat, script, statistics;
   std::optional<std::future<lr::render::ImageRgba8>> capture;
   std::vector<std::uint32_t> normalPixels;
+  struct BlackFlashOp {
+    char const *name = "";
+    std::uint64_t blackSamples = 0, samples = 0, hostChanges = 0;
+    qint64 blackMs = 0, latencyMs = 0;
+    WId host = 0;
+    QElapsedTimer timer;
+    bool armed = false, seenContent = false;
+  } flash;
+  QImage sampleViewport() const {
+    if (auto native = window->viewport().nativeWindow()) {
+      if (auto screen = native->screen())
+        return screen->grabWindow(native->winId()).toImage();
+    }
+    return window->viewport().readbackImage();
+  }
+  static bool nearBlack(QImage img) {
+    if (img.isNull() || img.width() < 2 || img.height() < 2)
+      return true;
+    img = img.convertToFormat(QImage::Format_RGB32);
+    int x0 = img.width() / 4, y0 = img.height() / 4, x1 = img.width() - x0, y1 = img.height() - y0;
+    double sum = 0;
+    int count = 0, bright = 0;
+    for (int y = y0; y < y1; y += 2)
+      for (int x = x0; x < x1; x += 2) {
+        auto p = img.pixel(x, y);
+        int r = qRed(p), g = qGreen(p), b = qBlue(p);
+        int luma = (r + g + b) / 3;
+        sum += luma;
+        ++count;
+        if (luma > 24)
+          ++bright;
+      }
+    return count == 0 || (bright == 0 && sum / count < 8);
+  }
+  void sampleFlash() {
+    if (!flash.armed || !window)
+      return;
+    ++flash.samples;
+    auto native = window->viewport().nativeWindow();
+    auto host = native ? native->winId() : 0;
+    if (flash.host && host && host != flash.host)
+      ++flash.hostChanges;
+    if (!host) {
+      // Shared path with no live native host is exactly the black-hole window gap.
+      ++flash.blackSamples;
+      flash.blackMs = flash.timer.elapsed();
+      return;
+    }
+    if (flash.host == 0)
+      flash.host = host;
+    auto img = native->screen() ? native->screen()->grabWindow(host).toImage() : QImage{};
+    if (nearBlack(img)) {
+      ++flash.blackSamples;
+      flash.blackMs = flash.timer.elapsed();
+    } else {
+      flash.seenContent = true;
+      flash.host = host;
+    }
+  }
+  void beginFlash(char const *name) {
+    flash = {};
+    flash.name = name;
+    flash.armed = true;
+    flash.host = window->viewport().nativeWindow() ? window->viewport().nativeWindow()->winId() : 0;
+    flash.timer.start();
+  }
+  void endFlash() {
+    flash.armed = false;
+    flash.latencyMs = flash.timer.elapsed();
+    std::cout << "black-flash op=" << flash.name << " blackSamples=" << flash.blackSamples
+              << " blackMs=" << flash.blackMs << " samples=" << flash.samples
+              << " latencyMs=" << flash.latencyMs << " hostChanges=" << flash.hostChanges
+              << " host=" << flash.host << std::endl;
+    if (flash.blackSamples || flash.hostChanges) {
+      code = 1;
+      std::cerr << "black-flash FAIL op=" << flash.name << std::endl;
+    }
+  }
+
   struct Joined {
     using receiver_concept = lexec::receiver_t;
     Viewer *owner;
@@ -99,7 +179,7 @@ struct Viewer : QObject {
         releaseDecodeAt = 0;
         decodeGate.release();
       }
-
+      sampleFlash();
       auto now = elapsed.elapsed();
       maxGuiGap = std::max(maxGuiGap, now - previousBeat);
       previousBeat = now;
@@ -535,6 +615,7 @@ struct Viewer : QObject {
               << std::endl;
     std::cout << "viewer stopped GUI heartbeats=" << beats
               << " elapsedMs=" << elapsed.elapsed() << std::endl;
+    std::cout << "viewer exit code=" << code << std::endl;
     app.exit(code);
   }
   ~Viewer() override {
@@ -630,6 +711,59 @@ struct Viewer : QObject {
     }
     if (test.rfind("close-", 0) == 0)
       return; // wait for the requested event, never silently run full scenario
+    if (test == "black-flash") {
+      auto completed = s->performance.completed;
+      if (stage == 0) {
+        if (completed == 0 || (s->path == PresentationPath::VulkanShared &&
+                               s->performance.sharedShown == 0))
+          return;
+        if (nearBlack(sampleViewport()))
+          return;
+        beginFlash("model");
+        session->selectModel({"diablo"});
+        lastCompleted = completed;
+        stage = 1;
+        return;
+      }
+      if (stage == 1) {
+        if (s->installedModel->value != "diablo" || completed <= lastCompleted ||
+            s->performance.inFlight)
+          return;
+        if (nearBlack(sampleViewport()))
+          return;
+        endFlash();
+        beginFlash("pipeline");
+        session->setRenderOptions({PipelineKind::Pathtrace, 1, false});
+        lastCompleted = completed;
+        stage = 2;
+        return;
+      }
+      if (stage == 2) {
+        if (s->performance.accumulatedSamples < 1 || completed <= lastCompleted ||
+            s->performance.inFlight)
+          return;
+        if (nearBlack(sampleViewport()))
+          return;
+        endFlash();
+        beginFlash("resize");
+        window->viewport().setFixedSize(220, 160);
+        lastCompleted = completed;
+        stage = 3;
+        return;
+      }
+      if (stage == 3) {
+        if (completed <= lastCompleted || s->performance.inFlight)
+          return;
+        if (nearBlack(sampleViewport()))
+          return;
+        endFlash();
+        std::cout << "black-flash GUI maxGapMs=" << maxGuiGap
+                  << " sharedShown=" << s->performance.sharedShown << std::endl;
+        requestStop();
+        return;
+      }
+      return;
+    }
     auto completed = s->performance.completed;
     switch (stage) {
     case 0:
@@ -907,7 +1041,7 @@ int main(int argc, char **argv) {
                   "path"});
   args.addOption({"model", "Catalog model", "model", "african_head"});
   args.addOption({"self-test",
-                  "P9 bounded interactions: full|close-load|close-install",
+                  "bounded interactions: full|black-flash|close-*",
                   "test"});
   args.addOption({"screenshot", "Local PNG output prefix", "path"});
 #ifdef DEMO_E2E
