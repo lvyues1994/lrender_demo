@@ -1,0 +1,359 @@
+diff --git a/README.md b/README.md
+index cd4e564..3c8367a 100644
+--- a/README.md
++++ b/README.md
+@@ -55,7 +55,7 @@ cp "$APP" /tmp/lrender-demo-bin/lrender_demo
+ Move/copy of the executable plus explicit resource root is supported on the tested
+ host; this is NOT a self-contained SDK/driver bundle or cross-machine packaging.
+ Drag to orbit, wheel to zoom, Reset view frames the installed bounds. Model,
+-pipeline, exposure, TAA, ambient, roughness and normal map controls emit values;
++pipeline (Visibility / Pathtrace / PathtraceInteractive), exposure, TAA, ambient, roughness and normal map controls emit values;
+ appearance commands synchronously acknowledge the actual GUI-applied value, even
+ when snapshot publication is delayed. Ambient/roughness typing commits on Return
+ or focus-out (arrows/wheel commit steps); periodic statistics refreshes preserve
+@@ -165,7 +165,7 @@ locks is a deliberate future review action, not an automatic configure step.
+ | third_party/doctest | `d44d4f6e66232d716af82f00a063759e9d0e50d6` | v2.5.3 |
+ | third_party/lexec | `a2568cc5bf14f69addc7d0e04b1e5ed5c0b2173b` | lrender: a2568cc5bf14f69addc7d0e04b1e5ed5c0b2173b; lqtexec fallback: e032d551d53d87209b83d07fd172890461db643b (not used; shared existing lexec::lexec target) |
+ | third_party/lqtexec | `f9c8d69d180f5c53bada3c3f408b9c356879a2e5` | direct demo dependency; latest default-branch HEAD at download, frozen by sha |
+-| third_party/lrender | `dcf36670724c65b016db9234309ad49192dda6c8` | direct demo dependency; latest default-branch HEAD at download, frozen by sha |
++| third_party/lrender | `d00dcf52c0cac4242464ad0ecd646466aa38ef97` | direct demo dependency; latest default-branch HEAD at download, frozen by sha |
+ | third_party/stackfull | `acb88611e1de8fbe7ed6e195ba76ad9cbb04a9dc` | acb88611e1de8fbe7ed6e195ba76ad9cbb04a9dc |
+ | third_party/stb | `4e9b368bfc071e97206ea5c6adba68dd0cbf8897` | 003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5 |
+ | third_party/tc_astcenc | `2bed807e63d5bd756d26cd00604e5ae3b86e3348` | 5.7.0 |
+diff --git a/cmake/dependencies.lock.json b/cmake/dependencies.lock.json
+index 509beb8..262399c 100644
+--- a/cmake/dependencies.lock.json
++++ b/cmake/dependencies.lock.json
+@@ -48,7 +48,7 @@
+       "path": "third_party/lrender",
+       "url": "https://github.com/lvyues1994/lrender.git",
+       "branch": "main",
+-      "sha": "dcf36670724c65b016db9234309ad49192dda6c8",
++      "sha": "d00dcf52c0cac4242464ad0ecd646466aa38ef97",
+       "upstreamPin": "direct demo dependency; latest default-branch HEAD at download, frozen by sha"
+     },
+     {
+diff --git a/src/app/main.cpp b/src/app/main.cpp
+index 3238866..530b956 100644
+--- a/src/app/main.cpp
++++ b/src/app/main.cpp
+@@ -119,7 +119,9 @@ struct Viewer : QObject {
+     if (!flash.armed || !window)
+       return;
+     ++flash.samples;
+-    if (session && session->snapshot()->path == PresentationPath::VulkanShared) {
++    auto const shared =
++        session && session->snapshot()->path == PresentationPath::VulkanShared;
++    if (shared) {
+       auto shown = session->snapshot()->performance.sharedShown;
+       if (shown < flash.sharedShownAtStart)
+         ++flash.sharedShownGap;
+@@ -130,21 +132,25 @@ struct Viewer : QObject {
+     auto host = native ? native->winId() : 0;
+     if (flash.host && host && host != flash.host)
+       ++flash.hostChanges;
+-    if (!host) {
++    if (shared && !host) {
+       // Shared path with no live native host is exactly the black-hole window gap.
+       ++flash.blackSamples;
+       flash.blackMs = flash.timer.elapsed();
+       return;
+     }
+-    if (flash.host == 0)
++    if (flash.host == 0 && host)
+       flash.host = host;
+-    auto img = native->screen() ? native->screen()->grabWindow(host).toImage() : QImage{};
++    // Readback has no native host; sample the owned widget image instead of grabWindow.
++    auto img = shared ? (native && native->screen() ? native->screen()->grabWindow(host).toImage()
++                                                    : QImage{})
++                      : sampleViewport();
+     if (nearBlack(img)) {
+       ++flash.blackSamples;
+       flash.blackMs = flash.timer.elapsed();
+     } else {
+       flash.seenContent = true;
+-      flash.host = host;
++      if (host)
++        flash.host = host;
+     }
+   }
+   void beginFlash(char const *name, int expectW = 0, int expectH = 0) {
+@@ -761,15 +767,27 @@ struct Viewer : QObject {
+         if (nearBlack(sampleViewport()))
+           return;
+         endFlash();
+-        // Leave Pathtrace before resize so continuous PT does not dominate the wait.
++        beginFlash("pipeline-interactive");
++        session->setRenderOptions({PipelineKind::PathtraceInteractive, 1, false});
++        lastCompleted = completed;
++        stage = 3;
++        return;
++      }
++      if (stage == 3) {
++        if (completed <= lastCompleted)
++          return;
++        if (nearBlack(sampleViewport()))
++          return;
++        endFlash();
++        // Leave path tracing before resize so continuous PT does not dominate the wait.
+         session->setRenderOptions({PipelineKind::Visibility, 1, false});
+         beginFlash("resize", 220, 160);
+         window->viewport().setFixedSize(220, 160);
+         lastCompleted = completed;
+-        stage = 3;
++        stage = 4;
+         return;
+       }
+-      if (stage == 3) {
++      if (stage == 4) {
+         if (completed <= lastCompleted)
+           return;
+         if (nearBlack(sampleViewport()))
+diff --git a/src/render/RenderSession.cpp b/src/render/RenderSession.cpp
+index 1319fc9..0c91cc6 100644
+--- a/src/render/RenderSession.cpp
++++ b/src/render/RenderSession.cpp
+@@ -614,9 +614,12 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
+       view.id = stamp->view;
+       view.target = *target;
+       view.camera = current->camera.camera;
+-      view.pipeline = current->options.pipeline == PipelineKind::Pathtrace
+-                          ? resources.renderer->pipelines().pathTraceReference()
+-                          : resources.renderer->pipelines().visibility();
++      if (current->options.pipeline == PipelineKind::PathtraceInteractive)
++        view.pipeline = resources.renderer->pipelines().pathTraceInteractive();
++      else if (current->options.pipeline == PipelineKind::Pathtrace)
++        view.pipeline = resources.renderer->pipelines().pathTraceReference();
++      else
++        view.pipeline = resources.renderer->pipelines().visibility();
+       view.settings.exposure = current->options.exposure;
+       view.settings.antiAliasing =
+           current->options.taa ? lr::render::AntiAliasing::Taa : lr::render::AntiAliasing::None;
+@@ -696,7 +699,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
+       }
+       if (!blocked() && record.textureSettling && record.stamp.generation == state.snapshot()->generation) {
+         auto o = state.snapshot()->options;
+-        if (o.pipeline == PipelineKind::Pathtrace || o.taa)
++        if (isPathTracePipeline(o.pipeline) || o.taa)
+           sceneParametersChanged();
+       }
+       if (resources.world && !blocked() && !result.lostTextures.empty()) {
+@@ -730,7 +733,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
+   }
+   void sceneParametersChanged() {
+     auto o = state.snapshot()->options;
+-    if (target && (o.pipeline == PipelineKind::Pathtrace || o.taa)) {
++    if (target && (isPathTracePipeline(o.pipeline) || o.taa)) {
+       state.presentationInvalidated(
+           {ErrorStage::Surface, true, "scene parameter history reset", "fresh temporal target"});
+       rebuild = true;
+@@ -964,7 +967,7 @@ void RenderSession::setRenderOptions(RenderOptions options) {
+   auto const previous = s.state.snapshot()->options;
+   s.state.setRenderOptions(options);
+   s.historyChange(previous.pipeline != options.pipeline || previous.taa != options.taa);
+-  s.pump.setContinuous(options.pipeline == PipelineKind::Pathtrace || options.taa);
++  s.pump.setContinuous(isPathTracePipeline(options.pipeline) || options.taa);
+   s.pump.markDirty();
+   s.queueTick();
+   s.publish();
+diff --git a/src/render/SessionTypes.h b/src/render/SessionTypes.h
+index c8e6406..95f13e1 100644
+--- a/src/render/SessionTypes.h
++++ b/src/render/SessionTypes.h
+@@ -13,7 +13,10 @@ namespace demo {
+ struct ModelId { std::string value; };
+ using AssetRequestId = std::uint64_t;
+ using SessionGeneration = std::uint64_t;
+-enum class PipelineKind { Visibility, Pathtrace };
++enum class PipelineKind { Visibility, Pathtrace, PathtraceInteractive };
++inline constexpr bool isPathTracePipeline(PipelineKind kind) noexcept {
++    return kind == PipelineKind::Pathtrace || kind == PipelineKind::PathtraceInteractive;
++}
+ enum class PresentationPath { VulkanShared, Readback };
+ enum class LifeState { Idle, Preparing, Running, Paused, Recovering, Stopping, Stopped, Failed };
+ enum class ErrorStage { Load, Surface, Probe, Submit, Present, Shutdown };
+diff --git a/src/ui/MainWindow.cpp b/src/ui/MainWindow.cpp
+index 8f7ab43..99f0a5b 100644
+--- a/src/ui/MainWindow.cpp
++++ b/src/ui/MainWindow.cpp
+@@ -50,7 +50,7 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
+   model_->addItems({"african_head", "diablo", "boggie", "floor"});
+   pipeline_ = new QComboBox;
+   pipeline_->setObjectName("pipeline");
+-  pipeline_->addItems({"Visibility", "Pathtrace"});
++  pipeline_->addItems({"Visibility", "Pathtrace", "PathtraceInteractive"});
+   exposure_ = new QDoubleSpinBox;
+   exposure_->setObjectName("exposure");
+   exposure_->setRange(.01, 100);
+@@ -132,11 +132,14 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
+           [this] { viewport_->resetCamera(bounds_); });
+ }
+ void MainWindow::optionsChanged() {
+-  if (commands_.options)
+-    commands_.options({pipeline_->currentIndex() == 1
+-                           ? PipelineKind::Pathtrace
+-                           : PipelineKind::Visibility,
+-                       float(exposure_->value()), taa_->isChecked()});
++  if (!commands_.options)
++    return;
++  auto pipeline = PipelineKind::Visibility;
++  if (pipeline_->currentIndex() == 1)
++    pipeline = PipelineKind::Pathtrace;
++  else if (pipeline_->currentIndex() == 2)
++    pipeline = PipelineKind::PathtraceInteractive;
++  commands_.options({pipeline, float(exposure_->value()), taa_->isChecked()});
+ }
+ void MainWindow::restoreAppearance() {
+   if (!lastSnapshot_)
+@@ -160,7 +163,9 @@ void MainWindow::showSnapshot(SessionSnapshotPtr s) {
+   QSignalBlocker a(model_), b(pipeline_), c(exposure_), d(taa_);
+   if (s->model)
+     model_->setCurrentText(QString::fromStdString(s->model->value));
+-  pipeline_->setCurrentIndex(s->options.pipeline == PipelineKind::Pathtrace);
++  pipeline_->setCurrentIndex(s->options.pipeline == PipelineKind::PathtraceInteractive ? 2
++                                 : s->options.pipeline == PipelineKind::Pathtrace       ? 1
++                                                                                       : 0);
+   exposure_->setValue(s->options.exposure);
+   taa_->setChecked(s->options.taa);
+   viewport_->showCamera(s->camera);
+diff --git a/tests/e2e_scenarios.cpp b/tests/e2e_scenarios.cpp
+index eefe421..cd6c77a 100644
+--- a/tests/e2e_scenarios.cpp
++++ b/tests/e2e_scenarios.cpp
+@@ -42,9 +42,12 @@ bool E2eScenario::tick(RenderSession &s, MainWindow &w) {
+     if (changes < 100 && (name == "cycle" || name == "resize")) {
+       if (name == "cycle") {
+         s.selectModel({ids[changes % 4]});
+-        s.setRenderOptions(
+-            {changes % 2 ? PipelineKind::Pathtrace : PipelineKind::Visibility,
+-             1, false});
++        auto pipeline = PipelineKind::Visibility;
++        if (changes % 3 == 1)
++          pipeline = PipelineKind::Pathtrace;
++        else if (changes % 3 == 2)
++          pipeline = PipelineKind::PathtraceInteractive;
++        s.setRenderOptions({pipeline, 1, false});
+       } else {
+         int x = changes % 4 ? 64 + int(changes % 13) : 0,
+             y = x ? 48 + int(changes % 7) : 0;
+diff --git a/tests/session_test.cpp b/tests/session_test.cpp
+index 072dc78..cce18dc 100644
+--- a/tests/session_test.cpp
++++ b/tests/session_test.cpp
+@@ -1173,6 +1173,89 @@ TEST_CASE("session/soft-rebuild-hide-zero-keeps-path-without-release") {
+   stop(s, h);
+   CHECK(std::count(stages.begin(), stages.end(), "release") == 1);
+ }
++
++TEST_CASE("session/pathtrace-interactive-selects-interactive-pipeline-and-stays-continuous") {
++  Harness h;
++  auto r = resources();
++  auto const interactive = r.renderer->pipelines().pathTraceInteractive();
++  auto const reference = r.renderer->pipelines().pathTraceReference();
++  auto const visibility = r.renderer->pipelines().visibility();
++  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world),
++                  std::make_unique<ReadbackAdapter>(h.imageEvents()), h.submit(), h.events());
++  start(s, false);
++  REQUIRE(test::until([&] { return h.jobs.size() == 1; }));
++  CHECK(h.jobs[0].frame.views[0].pipeline == visibility);
++  h.complete(0);
++  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
++
++  RenderOptions options;
++  options.pipeline = PipelineKind::PathtraceInteractive;
++  s.setRenderOptions(options);
++  REQUIRE(test::until([&] { return h.jobs.size() >= 2; }));
++  CHECK(h.jobs[1].frame.views[0].pipeline == interactive);
++  CHECK(h.jobs[1].frame.views[0].pipeline != reference);
++  h.complete(1);
++  REQUIRE(test::until([&] { return h.jobs.size() >= 3; }));
++  CHECK(h.jobs.back().frame.views[0].pipeline == interactive);
++  for (std::size_t i = 2; i < h.jobs.size(); ++i) h.complete(i);
++  stop(s, h);
++}
++
++TEST_CASE("session/cpu_smoke-pathtrace-interactive-accumulates-nonblack") {
++  Harness h;
++  auto s = session(h, true);
++  h.readSnapshot = [&] { return s->snapshot(); };
++  start(*s, false);
++  REQUIRE(test::until([&] { return h.images >= 1; }));
++  RenderOptions options;
++  options.pipeline = PipelineKind::PathtraceInteractive;
++  s->setRenderOptions(options);
++  REQUIRE(test::until([&] { return s->snapshot()->performance.accumulatedSamples >= 2 && h.images >= 2; }));
++  CHECK(s->snapshot()->backend == "cpu");
++  REQUIRE(h.lastImage);
++  REQUIRE(h.lastImage->image);
++  CHECK(h.lastImage->image->extent.x == 8);
++  CHECK(h.lastImage->image->extent.y == 8);
++  auto bright = 0u;
++  for (auto pixel : h.lastImage->image->pixels) {
++    auto r = pixel & 0xffu, g = (pixel >> 8) & 0xffu, b = (pixel >> 16) & 0xffu;
++    if ((r + g + b) / 3u > 8u) ++bright;
++  }
++  CHECK(bright > 0);
++  stop(*s, h);
++}
++
++TEST_CASE("session/soft-rebuild-pathtrace-interactive-keeps-path-without-release") {
++  Harness h;
++  std::vector<std::string> stages;
++  auto adapter = std::make_unique<ReadbackAdapter>(h.imageEvents(), [&](auto stage, Done done) {
++    stages.push_back(stage);
++    done(std::monostate{});
++  });
++  auto r = resources();
++  auto const interactive = r.renderer->pipelines().pathTraceInteractive();
++  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world), std::move(adapter),
++                  h.submit(), h.events());
++  start(s, false);
++  REQUIRE(test::until([&] { return h.jobs.size() == 1; }));
++  h.complete(0);
++  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
++  auto generation = s.snapshot()->generation;
++  auto firstTarget = h.jobs[0].frame.views[0].target;
++  RenderOptions options;
++  options.pipeline = PipelineKind::PathtraceInteractive;
++  s.setRenderOptions(options);
++  REQUIRE(test::until([&] { return h.jobs.size() >= 2; }));
++  CHECK(s.snapshot()->generation > generation);
++  CHECK(h.jobs[1].frame.views[0].target != firstTarget);
++  CHECK(h.jobs[1].frame.views[0].pipeline == interactive);
++  CHECK(std::count(stages.begin(), stages.end(), "release") == 0);
++  CHECK(std::count(stages.begin(), stages.end(), "prepare") == 1);
++  for (std::size_t i = 1; i < h.jobs.size(); ++i) h.complete(i);
++  stop(s, h);
++  CHECK(std::count(stages.begin(), stages.end(), "release") == 1);
++}
++
+ TEST_CASE("session/soft-rebuild-resize-uses-host-physical-not-cached-wsi") {
+   Harness h;
+   struct Spy : ReadbackAdapter {
+diff --git a/tests/ui_test.cpp b/tests/ui_test.cpp
+index 87ed0cc..abe5b06 100644
+--- a/tests/ui_test.cpp
++++ b/tests/ui_test.cpp
+@@ -71,8 +71,11 @@ TEST_CASE("ui/options-and-model-commands-snapshot-does-not-loop") {
+   REQUIRE(pipeline);
+   REQUIRE(exposure);
+   REQUIRE(model);
++  CHECK(pipeline->count() == 3);
+   pipeline->setCurrentIndex(1);
+   CHECK(last.pipeline == PipelineKind::Pathtrace);
++  pipeline->setCurrentIndex(2);
++  CHECK(last.pipeline == PipelineKind::PathtraceInteractive);
+   exposure->setValue(2);
+   CHECK(last.exposure == 2);
+   model->setCurrentIndex(1);
+@@ -81,8 +84,10 @@ TEST_CASE("ui/options-and-model-commands-snapshot-does-not-loop") {
+   auto count = options;
+   auto snap = std::make_shared<SessionSnapshot>();
+   snap->options.exposure = 3;
++  snap->options.pipeline = PipelineKind::PathtraceInteractive;
+   snap->model = ModelId{"floor"};
+   window.showSnapshot(snap);
++  CHECK(pipeline->currentIndex() == 2);
+   CHECK(options == count);
+   CHECK(models == 1);
+ }
