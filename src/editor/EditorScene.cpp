@@ -104,6 +104,15 @@ void EditorScene::setMeshMaterial(entt::entity e, lr::core::MeshId mesh,
   markDirty(e);
 }
 
+void EditorScene::clearMeshMaterial(entt::entity e) {
+  requireGui();
+  if (!registry_.valid(e))
+    throw std::invalid_argument("EditorScene: invalid entity");
+  registry_.remove<MeshRef>(e);
+  registry_.remove<MaterialRef>(e);
+  markDirty(e);
+}
+
 std::vector<entt::entity> EditorScene::collectSubtree(entt::entity root) const {
   std::vector<entt::entity> out;
   std::vector<entt::entity> stack{root};
@@ -235,15 +244,51 @@ void EditorScene::remirrorInstalledFromWorld(
   if (worldEntities.size() != names.size() || worldEntities.size() != meshes.size() ||
       worldEntities.size() != materials.size())
     throw std::logic_error("EditorScene::remirrorInstalledFromWorld: size mismatch");
-  // Phase 1: create every Installed mirror with World local transform, parent null.
+  auto worldKey = [](lr::core::EntityId id) -> std::uint64_t {
+    return (static_cast<std::uint64_t>(id.generation) << 32) |
+           static_cast<std::uint64_t>(id.index);
+  };
+  std::unordered_map<std::uint64_t, entt::entity> installedByWorld;
+  for (auto [e, link] : registry_.view<WorldLink, Installed>().each()) {
+    if (link.id.isValid())
+      installedByWorld[worldKey(link.id)] = e;
+  }
+  std::unordered_set<std::uint32_t> keep;
   for (std::size_t i = 0; i < worldEntities.size(); ++i) {
     if (!world.isAlive(worldEntities[i]))
       throw std::logic_error("EditorScene::remirrorInstalledFromWorld: entity not alive");
     auto local = world.transformOf(worldEntities[i]);
-    adoptWorldEntity(worldEntities[i], names[i], local, meshes[i], materials[i], std::nullopt);
+    auto key = worldKey(worldEntities[i]);
+    auto it = installedByWorld.find(key);
+    if (it != installedByWorld.end()) {
+      // I3: reuse editor entity — stable id for undo stack + E4 selection.
+      auto e = it->second;
+      registry_.get<Name>(e).value = names[i];
+      registry_.get<LocalTransform>(e).value = local;
+      registry_.emplace_or_replace<MeshRef>(e, MeshRef{meshes[i]});
+      registry_.emplace_or_replace<MaterialRef>(e, MaterialRef{materials[i]});
+      keep.insert(static_cast<std::uint32_t>(entt::to_integral(e)));
+    } else {
+      auto e = adoptWorldEntity(worldEntities[i], names[i], local, meshes[i], materials[i],
+                                std::nullopt);
+      keep.insert(static_cast<std::uint32_t>(entt::to_integral(e)));
+    }
   }
-  // Phase 2: restore ALL WorldLink parent/transform edges from World (orphans under
-  // installed, installed under user, moved parts, sibling mirrors). No Dirty.
+  std::vector<entt::entity> doomed;
+  for (auto e : registry_.view<Installed>()) {
+    if (!keep.count(static_cast<std::uint32_t>(entt::to_integral(e))))
+      doomed.push_back(e);
+  }
+  for (auto e : doomed) {
+    if (!registry_.valid(e))
+      continue;
+    for (auto child : registry_.view<Hierarchy>()) {
+      auto &hier = registry_.get<Hierarchy>(child);
+      if (hier.parent && *hier.parent == e)
+        hier.parent = std::nullopt;
+    }
+    registry_.destroy(e);
+  }
   restoreHierarchyFromWorld(world);
 }
 
@@ -252,10 +297,9 @@ void EditorScene::readoptInstalledFromWorld(
     std::vector<std::string> const &names, std::vector<lr::core::MeshId> const &meshes,
     std::vector<lr::core::MaterialId> const &materials) {
   requireGui();
-  // I3: flush Dirty while Installed mirrors still exist (so parents resolve), then
-  // drop mirrors and rebuild from World SoT. Rollback already completed before call.
+  // I3: flush Dirty while Installed mirrors still exist (parents resolve), then
+  // remirror in place (reuse editor entities by WorldLink). No destroy/recreate.
   syncToWorld(world);
-  forgetInstalledMirrors();
   remirrorInstalledFromWorld(world, worldEntities, names, meshes, materials);
 }
 
@@ -351,6 +395,10 @@ void EditorScene::syncToWorld(lr::scene::World &world) {
       if (auto const *mesh = registry_.try_get<MeshRef>(e)) {
         if (auto const *mat = registry_.try_get<MaterialRef>(e))
           world.setRenderable(link->id, {mesh->id, mat->id});
+        else
+          world.removeRenderable(link->id);
+      } else {
+        world.removeRenderable(link->id);
       }
     } else {
       auto created = world.createEntity(local, worldParent);

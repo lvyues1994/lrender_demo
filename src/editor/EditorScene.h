@@ -33,6 +33,8 @@ public:
   // Rejects cycles (ancestor check) at edit time — never deferred to sync/frame.
   void setParent(entt::entity e, std::optional<entt::entity> parent);
   void setMeshMaterial(entt::entity e, lr::core::MeshId mesh, lr::core::MaterialId material);
+  // Remove MeshRef/MaterialRef (marks Dirty); sync calls World::removeRenderable.
+  void clearMeshMaterial(entt::entity e);
 
   // Cascade-destroy e and all descendants in the registry. Queues a single World
   // destroy for the root WorldLink (World already cascade-destroys descendants).
@@ -54,18 +56,19 @@ public:
   void forgetInstalledMirrors();
 
   // World-SoT remirror after cancel/fail rollback (also used on commit adopt):
-  // create Installed mirrors from World transformOf (parent null), then restore every
-  // WorldLink's parent/local transform from World via WorldLink→editor map (parents may
-  // be user entities or other mirrors). Never marks Dirty. Folds former orphan-rebind.
+  // Reuse Installed editor entities that already mirror the same World EntityId
+  // (stable entt id across rollback — E3 undo + E4 selection); create only for
+  // new World ids; destroy Installed no longer in the list. Then restore every
+  // WorldLink parent/local from World. Never marks Dirty.
   void remirrorInstalledFromWorld(lr::scene::World &world,
                                   std::vector<lr::core::EntityId> const &worldEntities,
                                   std::vector<std::string> const &names,
                                   std::vector<lr::core::MeshId> const &meshes,
                                   std::vector<lr::core::MaterialId> const &materials);
 
-  // Cancel/fail remirror: sync Dirty into World while old Installed mirrors still
-  // exist, drop them, then remirrorInstalledFromWorld (World SoT). Same entry used
-  // by RenderSession::readoptInstalledAfterRollback and random op6.
+  // Cancel/fail remirror: sync Dirty while Installed mirrors still exist, then
+  // remirrorInstalledFromWorld (reuse-in-place). Same entry used by
+  // RenderSession::readoptInstalledAfterRollback and random op6.
   void readoptInstalledFromWorld(lr::scene::World &world,
                                  std::vector<lr::core::EntityId> const &worldEntities,
                                  std::vector<std::string> const &names,
@@ -79,11 +82,12 @@ public:
   std::size_t pendingWorldDestroyCount() const noexcept;
 
   bool wouldCreateCycle(entt::entity e, entt::entity newParent) const;
+  // Cascade set for destroy / undo purge (M3).
+  std::vector<entt::entity> collectSubtree(entt::entity root) const;
 
 private:
   void requireGui() const;
   void markDirty(entt::entity e);
-  std::vector<entt::entity> collectSubtree(entt::entity root) const;
   std::vector<entt::entity> topologicalDirty() const;
   void restoreHierarchyFromWorld(lr::scene::World &world);
 

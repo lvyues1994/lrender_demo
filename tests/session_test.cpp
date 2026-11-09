@@ -1535,3 +1535,99 @@ TEST_CASE("session/editor-undo-cleared-on-model-commit") {
   REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
   stop(*s, h);
 }
+
+
+TEST_CASE("session/editor-undo-material-from-none") {
+  // I1 + Minor1: bare entity → set mesh → undo clears renderable → redo restores.
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  REQUIRE_FALSE(h.jobs[0].frame.delta.instances.empty());
+  auto mesh = h.jobs[0].frame.delta.instances[0].mesh;
+  auto mat = h.jobs[0].frame.delta.instances[0].material;
+  auto id = s->createEditorEntity("U", {});
+  s->setEntityMeshMaterial(id, mesh, mat);
+  {
+    auto snap = s->snapshot();
+    bool found = false;
+    for (auto const &e : snap->entities)
+      if (e.id == id)
+        found = true;
+    REQUIRE(found);
+  }
+  REQUIRE(s->canUndo());
+  auto extractionsBefore = s->snapshot()->performance.deltaExtractions;
+  auto jobsBefore = h.jobs.size();
+  s->undo();
+  // Minor1: force Dirty sync/extract — invalid MeshId must not fault the session.
+  REQUIRE(test::until([&] {
+    return s->snapshot()->life == LifeState::Failed || h.jobs.size() > jobsBefore ||
+           s->snapshot()->performance.deltaExtractions > extractionsBefore;
+  }));
+  CHECK(s->snapshot()->life != LifeState::Failed);
+  for (std::size_t i = jobsBefore; i < h.jobs.size(); ++i)
+    h.complete(i);
+  s->redo();
+  CHECK(s->snapshot()->life != LifeState::Failed);
+  CHECK(s->canUndo());
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+}
+
+TEST_CASE("session/editor-undo-merge-preserves-pre-merge") {
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  auto id = s->createEditorEntity("drag", {});
+  lr::core::Transform x1{};
+  x1.translation = {1.f, 0.f, 0.f};
+  s->setEntityTransform(id, x1);
+  s->beginEditMerge();
+  lr::core::Transform x2{};
+  x2.translation = {2.f, 0.f, 0.f};
+  s->setEntityTransform(id, x2);
+  lr::core::Transform x3{};
+  x3.translation = {3.f, 0.f, 0.f};
+  s->setEntityTransform(id, x3);
+  s->endEditMerge();
+  s->undo();
+  {
+    auto snap = s->snapshot();
+    for (auto const &e : snap->entities)
+      if (e.id == id)
+        CHECK(e.local.translation.x == doctest::Approx(1.f));
+  }
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+}
+
+TEST_CASE("session/can-undo-false-when-blocked") {
+  // M5
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  auto id = s->createEditorEntity("b", {});
+  lr::core::Transform xf{};
+  xf.translation = {1.f, 0.f, 0.f};
+  s->setEntityTransform(id, xf);
+  REQUIRE(s->canUndo());
+  s->requestStop();
+  REQUIRE(test::until([&] { return s->snapshot()->life == LifeState::Stopped ||
+                                   s->snapshot()->life == LifeState::Stopping; }));
+  // After stop requested, blocked → canUndo false (or after fully stopped).
+  // Drain
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->life == LifeState::Stopped; }));
+  CHECK_FALSE(s->canUndo());
+  CHECK_FALSE(s->canRedo());
+}

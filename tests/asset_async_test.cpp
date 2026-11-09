@@ -1574,3 +1574,158 @@ TEST_CASE("asset_async/model-commit-clears-undo-history") {
   CHECK_FALSE(session.canRedo());
   stop(session, h);
 }
+
+
+TEST_CASE("asset_async/undo-redo-after-install-cancel-keeps-ids") {
+  // I3: U→3, part0→5, cancel mid diablo install; undo×2 / redo×2; ids stable.
+  App app([](auto const &e, auto) -> Result<CpuAssetPtr> {
+    if (e.id.value == "diablo")
+      return fixture(e.id.value, 64);
+    return fixture(e.id.value, 2);
+  });
+  auto r = resources(app);
+  Harness h;
+  RenderSession *owner = nullptr;
+  bool cancelled = false;
+  bool armed = false;
+  auto events = h.events();
+  events.onSnapshot = [&](auto snap) {
+    if (!owner || !armed || cancelled)
+      return;
+    if (snap->assetInstalling && snap->installationParts > 0) {
+      cancelled = true;
+      owner->selectModel({"not-in-catalog"});
+    }
+  };
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), std::move(events));
+  owner = &session;
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel && h.image &&
+           h.image->stamp.generation == session.snapshot()->generation;
+  }));
+  EditorEntityId part0{};
+  {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities)
+      if (e.installed && e.name.find("/part0") != std::string::npos)
+        part0 = e.id;
+  }
+  REQUIRE(part0.isValid());
+  auto uId = session.createEditorEntity("U", {});
+  lr::core::Transform uxf{};
+  uxf.translation = {3.f, 0.f, 0.f};
+  session.setEntityTransform(uId, uxf);
+  lr::core::Transform p0xf{};
+  p0xf.translation = {5.f, 0.f, 0.f};
+  session.setEntityTransform(part0, p0xf);
+  armed = true;
+  session.selectModel({"diablo"});
+  REQUIRE(test::until([&] {
+    auto snap = session.snapshot();
+    return cancelled && !snap->assetInstalling && snap->installedModel &&
+           snap->installedModel->value == "african_head";
+  }));
+  auto xOf = [&](EditorEntityId id) -> float {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities)
+      if (e.id == id)
+        return e.local.translation.x;
+    return -999.f;
+  };
+  CHECK(xOf(part0) == doctest::Approx(5.f));
+  CHECK(xOf(uId) == doctest::Approx(3.f));
+  session.undo();
+  CHECK(xOf(part0) == doctest::Approx(0.f));
+  session.undo();
+  CHECK(xOf(uId) == doctest::Approx(0.f));
+  session.redo();
+  CHECK(xOf(uId) == doctest::Approx(3.f));
+  session.redo();
+  CHECK(xOf(part0) == doctest::Approx(5.f));
+  CHECK(session.snapshot()->life != LifeState::Failed);
+  stop(session, h);
+}
+
+TEST_CASE("asset_async/undo-redo-after-install-fail-keeps-ids") {
+  // I3 fail-closed mid-staging: remirror reuses Installed editor ids (same as cancel).
+  // Pre-move part0→5 and U→3; poison diablo install; after Failed same EditorEntityIds
+  // still address those entities with transforms intact.
+  // M5: canUndo is false while faulted/Failed — full undo/redo covered on cancel path.
+  CpuAssetPtr poison;
+  App app([&](auto const &e, auto) -> Result<CpuAssetPtr> {
+    if (e.id.value != "diablo")
+      return fixture(e.id.value, 2);
+    auto live = std::make_shared<CpuAsset>(*fixture(e.id.value, 2));
+    live->parts[1].mesh =
+        std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({.4f, .4f}));
+    poison = live;
+    return poison;
+  });
+  auto r = resources(app);
+  Harness h;
+  RenderSession *owner = nullptr;
+  bool armed = false;
+  bool poisoned = false;
+  auto events = h.events();
+  events.onSnapshot = [&](auto snap) {
+    if (!owner || !armed || poisoned)
+      return;
+    if (snap->assetInstalling && snap->installationParts >= 1) {
+      if (poison && poison->parts.size() > 1) {
+        auto live = std::const_pointer_cast<CpuAsset>(poison);
+        live->parts[1].mesh = {};
+      }
+      poisoned = true;
+    }
+  };
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), std::move(events));
+  owner = &session;
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel && h.image &&
+           h.image->stamp.generation == session.snapshot()->generation;
+  }));
+  EditorEntityId part0{};
+  {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities)
+      if (e.installed && e.name.find("/part0") != std::string::npos)
+        part0 = e.id;
+  }
+  REQUIRE(part0.isValid());
+  auto uId = session.createEditorEntity("U", {});
+  lr::core::Transform uxf{};
+  uxf.translation = {3.f, 0.f, 0.f};
+  session.setEntityTransform(uId, uxf);
+  lr::core::Transform p0xf{};
+  p0xf.translation = {5.f, 0.f, 0.f};
+  session.setEntityTransform(part0, p0xf);
+  armed = true;
+  session.selectModel({"diablo"});
+  REQUIRE(test::until([&] {
+    return poisoned && session.snapshot()->life == LifeState::Failed;
+  }));
+  auto xOf = [&](EditorEntityId id) -> float {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities)
+      if (e.id == id)
+        return e.local.translation.x;
+    return -999.f;
+  };
+  CHECK(xOf(part0) == doctest::Approx(5.f));
+  CHECK(xOf(uId) == doctest::Approx(3.f));
+  CHECK_FALSE(session.canUndo());
+  session.requestStop();
+  REQUIRE(test::until([&] { return h.stopped; }));
+}

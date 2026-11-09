@@ -1,4 +1,6 @@
 #include "editor/commands/CommandHistory.h"
+
+#include <algorithm>
 #include <type_traits>
 #include <utility>
 
@@ -35,34 +37,49 @@ void coalesceInto(EditorCommand &dst, EditorCommand const &src) {
       dst);
 }
 
-lr::core::MeshId meshOf(EditorScene const &scene, entt::entity e) {
-  auto const *m = scene.registry().try_get<MeshRef>(e);
-  return m ? m->id : lr::core::MeshId{};
+std::optional<std::pair<lr::core::MeshId, lr::core::MaterialId>>
+materialBeforeOf(EditorScene const &scene, entt::entity e) {
+  auto const *mesh = scene.registry().try_get<MeshRef>(e);
+  auto const *mat = scene.registry().try_get<MaterialRef>(e);
+  if (!mesh || !mat)
+    return std::nullopt;
+  return std::make_pair(mesh->id, mat->id);
 }
 
-lr::core::MaterialId materialOf(EditorScene const &scene, entt::entity e) {
-  auto const *m = scene.registry().try_get<MaterialRef>(e);
-  return m ? m->id : lr::core::MaterialId{};
+bool referencesEntity(EditorCommand const &cmd, entt::entity e) {
+  return std::visit([&](auto const &c) { return c.entity == e; }, cmd);
 }
 
 } // namespace
 
-void CommandHistory::beginMerge() { ++mergeDepth_; }
+void CommandHistory::endMergeFully() noexcept {
+  mergeDepth_ = 0;
+  mergeAnchor_.reset();
+}
+
+void CommandHistory::beginMerge() {
+  if (mergeDepth_ == 0)
+    mergeAnchor_ = undo_.size();
+  ++mergeDepth_;
+}
 
 void CommandHistory::endMerge() {
   if (mergeDepth_ > 0)
     --mergeDepth_;
+  if (mergeDepth_ == 0)
+    mergeAnchor_.reset();
 }
 
 void CommandHistory::clear() noexcept {
   undo_.clear();
   redo_.clear();
-  // Leave mergeDepth alone? Clear during model switch should end merge.
-  mergeDepth_ = 0;
+  endMergeFully();
 }
 
 void CommandHistory::pushNew(EditorCommand cmd) {
-  if (mergeDepth_ > 0 && !undo_.empty() && sameEntityKind(undo_.back(), cmd)) {
+  // I2: only coalesce with entries pushed inside this merge window.
+  if (mergeDepth_ > 0 && mergeAnchor_ && undo_.size() > *mergeAnchor_ &&
+      sameEntityKind(undo_.back(), cmd)) {
     coalesceInto(undo_.back(), cmd);
   } else {
     undo_.push_back(std::move(cmd));
@@ -75,11 +92,11 @@ void CommandHistory::recordTransform(entt::entity entity, lr::core::Transform be
   pushNew(TransformCommand{entity, before, after});
 }
 
-void CommandHistory::recordMaterial(entt::entity entity, lr::core::MeshId meshBefore,
-                                   lr::core::MaterialId materialBefore,
-                                   lr::core::MeshId meshAfter,
-                                   lr::core::MaterialId materialAfter) {
-  pushNew(MaterialCommand{entity, meshBefore, materialBefore, meshAfter, materialAfter});
+void CommandHistory::recordMaterial(
+    entt::entity entity,
+    std::optional<std::pair<lr::core::MeshId, lr::core::MaterialId>> before,
+    lr::core::MeshId meshAfter, lr::core::MaterialId materialAfter) {
+  pushNew(MaterialCommand{entity, std::move(before), meshAfter, materialAfter});
 }
 
 void CommandHistory::executeTransform(EditorScene &scene, entt::entity entity,
@@ -95,10 +112,9 @@ void CommandHistory::executeMaterial(EditorScene &scene, entt::entity entity,
                                     lr::core::MeshId mesh, lr::core::MaterialId material) {
   if (!scene.registry().valid(entity))
     return;
-  auto mb = meshOf(scene, entity);
-  auto matb = materialOf(scene, entity);
+  auto before = materialBeforeOf(scene, entity);
   scene.setMeshMaterial(entity, mesh, material);
-  recordMaterial(entity, mb, matb, mesh, material);
+  recordMaterial(entity, before, mesh, material);
 }
 
 void CommandHistory::applyBefore(EditorScene &scene, EditorCommand const &cmd) {
@@ -107,9 +123,13 @@ void CommandHistory::applyBefore(EditorScene &scene, EditorCommand const &cmd) {
         if (!scene.registry().valid(c.entity))
           return;
         if constexpr (std::is_same_v<std::decay_t<decltype(c)>, TransformCommand>) {
+          // Restores local TRS (editor LocalTransform), not world-space.
           scene.setLocalTransform(c.entity, c.before);
         } else {
-          scene.setMeshMaterial(c.entity, c.meshBefore, c.materialBefore);
+          if (c.before)
+            scene.setMeshMaterial(c.entity, c.before->first, c.before->second);
+          else
+            scene.clearMeshMaterial(c.entity);
         }
       },
       cmd);
@@ -130,6 +150,7 @@ void CommandHistory::applyAfter(EditorScene &scene, EditorCommand const &cmd) {
 }
 
 void CommandHistory::undo(EditorScene &scene) {
+  endMergeFully();
   if (undo_.empty())
     return;
   auto cmd = std::move(undo_.back());
@@ -139,12 +160,26 @@ void CommandHistory::undo(EditorScene &scene) {
 }
 
 void CommandHistory::redo(EditorScene &scene) {
+  endMergeFully();
   if (redo_.empty())
     return;
   auto cmd = std::move(redo_.back());
   redo_.pop_back();
   applyAfter(scene, cmd);
   undo_.push_back(std::move(cmd));
+}
+
+void CommandHistory::forgetEntity(entt::entity e) {
+  auto drop = [&](std::vector<EditorCommand> &stack) {
+    stack.erase(std::remove_if(stack.begin(), stack.end(),
+                               [&](EditorCommand const &c) { return referencesEntity(c, e); }),
+                stack.end());
+  };
+  drop(undo_);
+  drop(redo_);
+  // Anchor may now point past size; clamp.
+  if (mergeAnchor_ && *mergeAnchor_ > undo_.size())
+    mergeAnchor_ = undo_.size();
 }
 
 } // namespace demo::editor

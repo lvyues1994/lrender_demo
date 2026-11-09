@@ -18,6 +18,8 @@
 #include <iostream>
 #include <lqtexec/EventLoopContext.h>
 #include <map>
+#include <optional>
+#include <utility>
 #include <string>
 namespace demo {
 namespace {
@@ -1263,10 +1265,11 @@ void RenderSession::setEntityMeshMaterial(EditorEntityId id, lr::core::MeshId me
     return;
   auto const *meshRef = s.editor.registry().try_get<editor::MeshRef>(e);
   auto const *matRef = s.editor.registry().try_get<editor::MaterialRef>(e);
-  auto meshBefore = meshRef ? meshRef->id : lr::core::MeshId{};
-  auto matBefore = matRef ? matRef->id : lr::core::MaterialId{};
+  std::optional<std::pair<lr::core::MeshId, lr::core::MaterialId>> before;
+  if (meshRef && matRef)
+    before = std::make_pair(meshRef->id, matRef->id);
   s.editor.setMeshMaterial(e, mesh, material);
-  s.history.recordMaterial(e, meshBefore, matBefore, mesh, material);
+  s.history.recordMaterial(e, before, mesh, material);
   s.pump.markDirty();
   s.queueTick();
   s.publish();
@@ -1279,6 +1282,9 @@ void RenderSession::destroyEntity(EditorEntityId id) {
   auto e = s.fromId(id);
   if (!s.editor.registry().valid(e))
     return;
+  // M3: purge undo/redo entries for the cascade before destroying.
+  for (auto node : s.editor.collectSubtree(e))
+    s.history.forgetEntity(node);
   s.editor.destroy(e);
   s.pump.markDirty();
   s.queueTick();
@@ -1305,9 +1311,14 @@ void RenderSession::redo() {
   s.publish();
 }
 bool RenderSession::canUndo() const {
+  // M5: blocked (stop/fault) → no undo affordance.
+  if (impl_->blocked())
+    return false;
   return impl_->history.canUndo();
 }
 bool RenderSession::canRedo() const {
+  if (impl_->blocked())
+    return false;
   return impl_->history.canRedo();
 }
 void RenderSession::beginEditMerge() {

@@ -15,6 +15,9 @@ using demo::editor::LocalTransform;
 using demo::editor::MeshRef;
 using demo::editor::MaterialRef;
 using demo::editor::Name;
+using demo::editor::Installed;
+using demo::editor::WorldLink;
+using demo::editor::MergeGuard;
 using demo::test::nearTransform;
 
 namespace {
@@ -194,7 +197,9 @@ TEST_CASE("undo/random-transform-material-roundtrip") {
     std::vector<entt::entity> ents;
     for (int i = 0; i < 4; ++i) {
       auto e = scene.create("e" + std::to_string(i), {});
-      scene.setMeshMaterial(e, mesh0, mat0);
+      // I1: keep e0 without mesh so set→undo→clearRenderable is exercised.
+      if (i != 0)
+        scene.setMeshMaterial(e, mesh0, mat0);
       ents.push_back(e);
     }
     scene.syncToWorld(*w);
@@ -224,4 +229,118 @@ TEST_CASE("undo/random-transform-material-roundtrip") {
     scene.syncToWorld(*w);
     demo::test::assertEditorWorldConsistent(scene, *w);
   }
+}
+
+
+TEST_CASE("undo/material-from-none-roundtrip") {
+  // I1: entity starts without MeshRef; undo must clear refs (not set invalid ids).
+  EditorScene scene;
+  auto w = lr::scene::makeWorld({});
+  auto mesh = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+  auto mat = w->resources().addMaterial({});
+  auto e = scene.create("bare", {});
+  REQUIRE_FALSE(scene.registry().all_of<MeshRef>(e));
+  CommandHistory hist;
+  hist.executeMaterial(scene, e, mesh, mat);
+  REQUIRE(scene.registry().all_of<MeshRef>(e));
+  hist.undo(scene);
+  CHECK_FALSE(scene.registry().all_of<MeshRef>(e));
+  CHECK_FALSE(scene.registry().all_of<MaterialRef>(e));
+  scene.syncToWorld(*w);
+  demo::test::assertEditorWorldConsistent(scene, *w);
+  hist.redo(scene);
+  CHECK(scene.registry().get<MeshRef>(e).id == mesh);
+  scene.syncToWorld(*w);
+  demo::test::assertEditorWorldConsistent(scene, *w);
+}
+
+TEST_CASE("undo/merge-preserves-pre-merge-command") {
+  // I2: standalone command before beginMerge must not coalesce into the drag.
+  EditorScene scene;
+  auto e = scene.create("drag", {});
+  CommandHistory hist;
+  lr::core::Transform x1{};
+  x1.translation = {1.f, 0.f, 0.f};
+  hist.executeTransform(scene, e, x1);
+  hist.beginMerge();
+  lr::core::Transform x2{};
+  x2.translation = {2.f, 0.f, 0.f};
+  hist.executeTransform(scene, e, x2);
+  lr::core::Transform x3{};
+  x3.translation = {3.f, 0.f, 0.f};
+  hist.executeTransform(scene, e, x3);
+  hist.endMerge();
+  CHECK(hist.undoDepth() == 2);
+  hist.undo(scene);
+  CHECK(scene.registry().get<LocalTransform>(e).value.translation.x == doctest::Approx(1.f));
+  hist.undo(scene);
+  CHECK(scene.registry().get<LocalTransform>(e).value.translation.x == doctest::Approx(0.f));
+}
+
+TEST_CASE("undo/destroy-purges-stack-entries") {
+  // M3: destroying an entity removes its commands so Ctrl+Z is not a no-op.
+  EditorScene scene;
+  auto a = scene.create("a", {});
+  auto b = scene.create("b", {});
+  CommandHistory hist;
+  lr::core::Transform xa{};
+  xa.translation = {1.f, 0.f, 0.f};
+  hist.executeTransform(scene, a, xa);
+  lr::core::Transform xb{};
+  xb.translation = {2.f, 0.f, 0.f};
+  hist.executeTransform(scene, b, xb);
+  hist.forgetEntity(a);
+  scene.destroy(a);
+  REQUIRE(hist.undoDepth() == 1);
+  hist.undo(scene);
+  CHECK(scene.registry().get<LocalTransform>(b).value.translation.x == doctest::Approx(0.f));
+  CHECK_FALSE(hist.canUndo());
+}
+
+TEST_CASE("undo/merge-guard-raii-and-undo-ends-merge") {
+  EditorScene scene;
+  auto e = scene.create("g", {});
+  CommandHistory hist;
+  {
+    MergeGuard guard(hist);
+    CHECK(hist.isMerging());
+    lr::core::Transform xf{};
+    xf.translation = {1.f, 0.f, 0.f};
+    hist.executeTransform(scene, e, xf);
+  }
+  CHECK_FALSE(hist.isMerging());
+  hist.beginMerge();
+  lr::core::Transform xf2{};
+  xf2.translation = {2.f, 0.f, 0.f};
+  hist.executeTransform(scene, e, xf2);
+  CHECK(hist.isMerging());
+  hist.undo(scene); // ends merge (M2)
+  CHECK_FALSE(hist.isMerging());
+}
+
+TEST_CASE("undo/readopt-reuses-installed-entity-ids") {
+  // I3 preferred: remirror keeps the same entt id for the same World entity.
+  EditorScene scene;
+  auto w = lr::scene::makeWorld({});
+  auto mesh = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+  auto mat = w->resources().addMaterial({});
+  auto wid = w->createEntity({}, std::nullopt);
+  w->setRenderable(wid, {mesh, mat});
+  auto part = scene.adoptWorldEntity(wid, "part0", {}, mesh, mat);
+  scene.syncToWorld(*w);
+  CommandHistory hist;
+  lr::core::Transform xf{};
+  xf.translation = {5.f, 0.f, 0.f};
+  hist.executeTransform(scene, part, xf);
+  scene.readoptInstalledFromWorld(*w, {wid}, {"part0"}, {mesh}, {mat});
+  REQUIRE(scene.registry().valid(part));
+  CHECK(scene.registry().all_of<Installed>(part));
+  CHECK(scene.registry().get<WorldLink>(part).id == wid);
+  CHECK(hist.undoDepth() == 1);
+  hist.undo(scene);
+  CHECK(scene.registry().get<LocalTransform>(part).value.translation.x == doctest::Approx(0.f));
+  scene.syncToWorld(*w);
+  demo::test::assertEditorWorldConsistent(scene, *w);
 }
