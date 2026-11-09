@@ -17,6 +17,7 @@
 #include <iostream>
 #include <lqtexec/EventLoopContext.h>
 #include <map>
+#include <string>
 namespace demo {
 namespace {
 lexec::static_thread_pool &cleanupPool() {
@@ -636,10 +637,12 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   // installed. N3: do NOT clearForModelSwitch (that would destroy editor-created
   // entities). Drop Installed mirrors only, then re-adopt installer->installed.
   void readoptInstalledAfterRollback() {
-    editor.forgetInstalledMirrors();
+    // I1: remember orphan→World parent, remirror Installed, rebind without Dirty.
+    auto orphans = editor.forgetInstalledMirrors();
     if (resources.world)
       editor.syncToWorld(*resources.world);
     mirrorInstalledIntoEditor();
+    editor.rebindOrphansToInstalledMirrors(orphans);
   }
 
   bool installStep() {
@@ -686,7 +689,14 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       readyAsset.reset();
       if (installer && installer->active())
         installer->rollback();
-      readoptInstalledAfterRollback(); // N3: restore editor↔World for still-installed model
+      try {
+        readoptInstalledAfterRollback(); // N3/I1: restore editor↔World for still-installed model
+      } catch (std::exception const &re) {
+        // M1: readopt must not escape — fail closed with the original install error.
+        fault(issue(ErrorStage::Load, "asset installation failed closed; readopt also failed",
+                    std::string(e.what()) + "; readopt: " + re.what()));
+        return true;
+      }
       fault(issue(ErrorStage::Load, "asset installation failed closed", e.what()));
     }
     return true;
@@ -746,12 +756,8 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     try {
       if (!pending) {
         // Push editor dirty TRS/hierarchy/mesh-mat into World before extract.
-        try {
-          editor.syncToWorld(*resources.world);
-        } catch (std::exception const &e) {
-          fault(issue(ErrorStage::Submit, "editor sync failed closed", e.what()));
-          return;
-        }
+        // C1: do not catch here — outer catch completes/erases the reserved stamp.
+        editor.syncToWorld(*resources.world);
         pending = resources.world->extractDelta();
         ++performance.deltaExtractions;
       }
@@ -780,7 +786,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     } catch (std::exception const &e) {
       pump.complete(*stamp);
       outstanding.erase(stamp->sequence);
-      fault(issue(ErrorStage::Submit, "pre-submit assembly failed; pending delta retained", e.what()));
+      fault(issue(ErrorStage::Submit, "editor sync or pre-submit assembly failed closed", e.what()));
       return;
     }
     auto self = shared_from_this();
@@ -1028,26 +1034,31 @@ void RenderSession::selectModel(ModelId id) {
   s.owner();
   if (s.blocked())
     return;
-  s.state.selectModel(std::move(id));
-  for (auto const &job : s.loads)
-    job.second.cancel();
-  s.pendingLoad.reset();
-  s.readyAsset.reset();
-  bool wasStaging = s.installer && s.installer->active();
-  s.installer->rollback();
-  if (wasStaging)
-    s.readoptInstalledAfterRollback(); // N3: keep editor-created; rebind Installed
-  if (!s.loader) {
-    s.report(issue(ErrorStage::Load, "asset loading unavailable", "no AssetLoader injected"));
-    return;
+  try {
+    s.state.selectModel(std::move(id));
+    for (auto const &job : s.loads)
+      job.second.cancel();
+    s.pendingLoad.reset();
+    s.readyAsset.reset();
+    bool wasStaging = s.installer && s.installer->active();
+    s.installer->rollback();
+    if (wasStaging)
+      s.readoptInstalledAfterRollback(); // N3/I1: keep editor-created; rebind Installed
+    if (!s.loader) {
+      s.report(issue(ErrorStage::Load, "asset loading unavailable", "no AssetLoader injected"));
+      return;
+    }
+    auto entry = AssetCatalog{}.describe(s.state.snapshot()->model.value());
+    if (auto e = std::get_if<RenderError>(&entry))
+      s.report(*e);
+    else
+      s.pendingLoad = std::get<AssetEntry>(std::move(entry));
+    s.queueTick();
+    s.publish();
+  } catch (std::exception const &e) {
+    // M2: never throw into Qt slots — fail closed.
+    s.fault(issue(ErrorStage::Load, "selectModel failed closed", e.what()));
   }
-  auto entry = AssetCatalog{}.describe(s.state.snapshot()->model.value());
-  if (auto e = std::get_if<RenderError>(&entry))
-    s.report(*e);
-  else
-    s.pendingLoad = std::get<AssetEntry>(std::move(entry));
-  s.queueTick();
-  s.publish();
 }
 void RenderSession::setAssetLoader(AssetLoader &loader) {
   impl_->owner();

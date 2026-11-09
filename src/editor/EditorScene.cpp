@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <algorithm>
+#include <cstdint>
 #include <queue>
 #include <stdexcept>
 #include <unordered_map>
@@ -180,23 +181,61 @@ void EditorScene::clearForModelSwitch() {
   clear(true);
 }
 
-void EditorScene::forgetInstalledMirrors() {
+std::vector<OrphanWorldParent> EditorScene::forgetInstalledMirrors() {
   requireGui();
-  // Remove Installed registry nodes without queuing World destroys (installer owns them).
-  // Do not touch editor-created entities (no Installed tag), even if parented under one.
+  // I1: before dropping Installed mirrors, remember editor-created children that
+  // pointed at them (by the parent's World EntityId) so remirror can reattach.
+  std::vector<OrphanWorldParent> orphans;
   std::vector<entt::entity> doomed;
   for (auto e : registry_.view<Installed>())
     doomed.push_back(e);
+  for (auto [child, hier] : registry_.view<Hierarchy>().each()) {
+    if (!hier.parent || !registry_.valid(*hier.parent))
+      continue;
+    if (!registry_.all_of<Installed>(*hier.parent))
+      continue;
+    if (registry_.all_of<Installed>(child))
+      continue; // both go away with the Installed set
+    auto const *link = registry_.try_get<WorldLink>(*hier.parent);
+    if (!link || !link->id.isValid())
+      continue;
+    orphans.push_back(OrphanWorldParent{child, link->id});
+  }
   for (auto e : doomed) {
     if (!registry_.valid(e))
       continue;
-    // Clear Hierarchy.parent pointers that referenced this installed node.
     for (auto child : registry_.view<Hierarchy>()) {
       auto &h = registry_.get<Hierarchy>(child);
       if (h.parent && *h.parent == e)
         h.parent = std::nullopt;
     }
     registry_.destroy(e);
+  }
+  return orphans;
+}
+
+void EditorScene::rebindOrphansToInstalledMirrors(std::vector<OrphanWorldParent> const &orphans) {
+  requireGui();
+  // Map World EntityId → new Installed editor mirror. No Dirty: World already parents so.
+  auto worldKey = [](lr::core::EntityId id) -> std::uint64_t {
+    return (static_cast<std::uint64_t>(id.generation) << 32) |
+           static_cast<std::uint64_t>(id.index);
+  };
+  std::unordered_map<std::uint64_t, entt::entity> byWorld;
+  for (auto [e, link] : registry_.view<WorldLink, Installed>().each()) {
+    if (link.id.isValid())
+      byWorld[worldKey(link.id)] = e;
+  }
+  for (auto const &o : orphans) {
+    if (!registry_.valid(o.child))
+      continue;
+    auto it = byWorld.find(worldKey(o.parentWorld));
+    if (it == byWorld.end())
+      continue; // installed World entity gone — leave as root
+    if (wouldCreateCycle(o.child, it->second))
+      throw std::logic_error("EditorScene::rebindOrphans: would create hierarchy cycle");
+    registry_.get<Hierarchy>(o.child).parent = it->second;
+    // intentionally not Dirty — World parent already matches
   }
 }
 

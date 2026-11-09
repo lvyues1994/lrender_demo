@@ -9,7 +9,9 @@
 #include <thread>
 
 using demo::editor::EditorScene;
+using demo::editor::Dirty;
 using demo::editor::Installed;
+using demo::editor::OrphanWorldParent;
 using demo::editor::Hierarchy;
 using demo::editor::WorldLink;
 
@@ -255,4 +257,35 @@ TEST_CASE("editor/n3-readopt-after-staging-rollback-restores-installed") {
   CHECK(s.registry().all_of<Installed>(e));
   CHECK(s.registry().get<WorldLink>(e).id == wid);
   CHECK(s.registry().valid(keep));
+}
+
+TEST_CASE("editor/probe11-forget-installed-rebinds-orphan-to-new-mirror") {
+  EditorScene s;
+  auto w = lr::scene::makeWorld({});
+  auto partWorld = w->createEntity({}, std::nullopt);
+  auto part = s.adoptWorldEntity(partWorld, "part0", {}, {}, {});
+  auto c = s.create("c", {}, part);
+  s.syncToWorld(*w);
+  auto cWorld = s.registry().get<WorldLink>(c).id;
+  REQUIRE(w->parentOf(cWorld).has_value());
+  CHECK(*w->parentOf(cWorld) == partWorld);
+
+  // readopt path: forget Installed mirrors then re-adopt same World entities.
+  auto orphans = s.forgetInstalledMirrors();
+  REQUIRE(orphans.size() == 1);
+  CHECK(orphans[0].child == c);
+  CHECK(orphans[0].parentWorld == partWorld);
+  CHECK_FALSE(s.registry().get<Hierarchy>(c).parent.has_value());
+  CHECK(w->isAlive(partWorld));
+  CHECK(w->parentOf(cWorld).has_value());
+  CHECK(*w->parentOf(cWorld) == partWorld); // World hierarchy unchanged
+
+  auto part2 = s.adoptWorldEntity(partWorld, "part0", {}, {}, {});
+  s.rebindOrphansToInstalledMirrors(orphans);
+  REQUIRE(s.registry().get<Hierarchy>(c).parent.has_value());
+  CHECK(*s.registry().get<Hierarchy>(c).parent == part2);
+  bool childDirty = s.registry().all_of<Dirty>(c);
+  CHECK_FALSE(childDirty);
+  // Editor cycle check now agrees with World: cannot parent part under c.
+  CHECK_THROWS_AS(s.setParent(part2, c), std::invalid_argument);
 }

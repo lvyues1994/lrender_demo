@@ -15,6 +15,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <string>
 using namespace demo;
 namespace {
 CpuAssetPtr fixture(std::string id, unsigned parts = 3, float marker = 0) {
@@ -699,30 +700,69 @@ TEST_CASE("asset_async/n3-cancel-mid-install-keeps-editor-entities-editable") {
     return session.snapshot()->installedModel && h.image &&
            h.image->stamp.generation == session.snapshot()->generation;
   }));
+  // Parent an editor child under installed part0, then cancel mid-install (I1).
+  EditorEntityId part0{};
+  {
+    auto snap = session.snapshot();
+    REQUIRE(snap->entities.size() >= 2);
+    for (auto const &e : snap->entities)
+      if (e.installed && e.name.find("/part0") != std::string::npos)
+        part0 = e.id;
+    REQUIRE(part0.isValid());
+  }
+  auto child = session.createEditorEntity("child", {}, part0);
+  REQUIRE(child.isValid());
+  REQUIRE(test::until([&] {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities)
+      if (e.id.value == child.value && e.parent && e.parent->value == part0.value)
+        return true;
+    return false;
+  }));
   keep = session.createEditorEntity("keep", {});
   REQUIRE(keep.isValid());
-  REQUIRE(session.snapshot()->entities.size() >= 3);
+  {
+    auto snap = session.snapshot();
+    REQUIRE(snap->entities.size() >= 4);
+  }
   session.selectModel({"diablo"});
   REQUIRE(test::until([&] {
     return cancelled && !session.snapshot()->assetInstalling &&
            session.snapshot()->installedModel.has_value() &&
            session.snapshot()->installedModel->value == "african_head";
   }));
-  bool found = false;
-  for (auto const &e : session.snapshot()->entities)
-    if (e.id.value == keep.value && e.name == "keep")
-      found = true;
-  CHECK(found);
+  {
+    auto snap = session.snapshot();
+    bool foundKeep = false;
+    bool childRebound = false;
+    EditorEntityId newPart0{};
+    for (auto const &e : snap->entities) {
+      if (e.id.value == keep.value && e.name == "keep")
+        foundKeep = true;
+      if (e.installed && e.name.find("/part0") != std::string::npos)
+        newPart0 = e.id;
+    }
+    CHECK(foundKeep);
+    REQUIRE(newPart0.isValid());
+    for (auto const &e : snap->entities)
+      if (e.id.value == child.value && e.parent && e.parent->value == newPart0.value)
+        childRebound = true;
+    CHECK(childRebound);
+    // Editor agrees with World: parenting part0 under child is a cycle.
+    CHECK_THROWS_AS(session.setEntityParent(newPart0, child), std::invalid_argument);
+  }
   lr::core::Transform xf{};
   xf.translation = {1.f, 2.f, 3.f};
   CHECK_NOTHROW(session.setEntityTransform(keep, xf));
   {
+    auto snap = session.snapshot();
     bool edited = false;
-    for (auto const &e : session.snapshot()->entities)
+    for (auto const &e : snap->entities)
       if (e.id.value == keep.value && e.local.translation.x == 1.f)
         edited = true;
     CHECK(edited);
   }
+  // After prior sync activity, stop must still complete (C1 guard on this path).
   stop(session, h);
 }
 

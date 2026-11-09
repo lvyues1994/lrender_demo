@@ -11,6 +11,12 @@
 
 namespace demo::editor {
 
+// Child whose Installed parent mirror was dropped; rebind by World EntityId.
+struct OrphanWorldParent {
+  entt::entity child{};
+  lr::core::EntityId parentWorld{};
+};
+
 // GUI-thread-exclusive editor registry. RenderSession owns the World; this owns
 // authoring state and pushes incremental dirty updates into World.
 //
@@ -50,7 +56,10 @@ public:
   // Model switch helper: forget Installed links, destroy editor-created World entities.
   void clearForModelSwitch();
   // Drop Installed editor mirrors only (no World destroy). Keeps editor-created entities.
-  void forgetInstalledMirrors();
+  // Returns orphans that had an Installed parent (parentWorld = that parent's WorldLink).
+  std::vector<OrphanWorldParent> forgetInstalledMirrors();
+  // Reattach orphans to new Installed mirrors of the same World entities. No Dirty.
+  void rebindOrphansToInstalledMirrors(std::vector<OrphanWorldParent> const &orphans);
 
   void syncToWorld(lr::scene::World &world);
 

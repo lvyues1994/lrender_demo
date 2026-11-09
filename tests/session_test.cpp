@@ -1367,3 +1367,29 @@ TEST_CASE("session/editor-value-commands-transform-in-snapshot") {
   REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
   stop(*s, h);
 }
+
+TEST_CASE("session/editor-sync-failure-releases-inflight-and-stop") {
+  // C1: sync throw after pump.reserve must complete/erase outstanding so stop finishes.
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+
+  auto id = s->createEditorEntity("bad", {});
+  REQUIRE(id.isValid());
+  // Invalid mesh/material → World::setRenderable throws inside syncToWorld.
+  s->setEntityMeshMaterial(id, {}, {});
+  REQUIRE(test::until([&] {
+    return s->snapshot()->error.has_value() || s->snapshot()->life == LifeState::Failed;
+  }));
+  CHECK(s->snapshot()->performance.inFlight == 0);
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  // stop must complete (would hang 8s+ if stamp leaked).
+  stop(*s, h);
+}
