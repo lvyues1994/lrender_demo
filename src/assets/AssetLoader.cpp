@@ -147,6 +147,9 @@ LoadTicket AssetLoader::beginLoad(AssetEntry entry, AssetRequestId request,
   auto receipt = [self, r](LoadOutcome value) {
     self->deliver(r, std::move(value));
   };
+  // Cancel: public API is write_env(get_stop_token) on `work` above.
+  // lexec::stop_when exists only as lexec::detail::stop_when (algorithms/stop_when.hpp);
+  // not exported to namespace lexec — see E1 report. associate ties load to app scope.
   auto hopped = lqtexec::then_on(std::move(work), *self->completion, receipt) |
                 lexec::upon_stopped([self, r]() noexcept {
                   self->deliver(r, {r->id, LoadStatus::Cancelled, {}, {}});
@@ -164,7 +167,7 @@ LoadTicket AssetLoader::beginLoad(AssetEntry entry, AssetRequestId request,
                     }}; // allocate before producer starts
   ++self->count;
   try {
-    lexec::spawn(std::move(hopped), self->root);
+    lexec::spawn(lexec::associate(std::move(hopped), self->root), self->root);
   } catch (...) {
     --self->count;
     throw;

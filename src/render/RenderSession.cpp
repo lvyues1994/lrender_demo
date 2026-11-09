@@ -216,6 +216,25 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       });
     };
   }
+  // M1: upon_error may run off-GUI; always hop before mutating phase / report.
+  void guiDrainFault(char const *message, char const *cause) {
+    auto self = shared_from_this();
+    post([self, message, cause] {
+      self->owner();
+      if (self->phase == Draining || self->phase == Releasing || self->phase == DrainFailed) {
+        self->phase = DrainFailed;
+        self->report(issue(ErrorStage::Shutdown, message, cause));
+      }
+    });
+  }
+  lqtexec::ObjectScope &drainHopScope() {
+    // Prefer cleanupScope: ~RenderSession resets uiScope before stop()/beginDrain.
+    if (cleanupScope)
+      return *cleanupScope;
+    if (uiScope)
+      return *uiScope;
+    throw std::logic_error("drain hop scope missing");
+  }
   void presentationError(RenderError error) {
     if (selectedPath == PresentationPath::VulkanShared && allowFallback && !stopRequested) {
       presentationWarnings.push_back(error.message + ": " + error.cause);
@@ -359,22 +378,21 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     if (selectedPath == PresentationPath::VulkanShared) {
       phase = Draining;
       auto self = shared_from_this();
-      // Sender launches drain; control() posts GUI hop (same delivery as pre-E1).
-      auto cont = control([finish](Impl &s, auto result) {
-        if (auto e = std::get_if<RenderError>(&result)) {
-          s.phase = DrainFailed;
-          s.report(*e);
-          return;
-        }
-        finish();
-      });
+      // Soft: drain | then_on(GUI, destroy+bind). Never releasePath (no black flash).
       auto chain = workflows::softDrainOnly(*adapter) |
-                   lexec::then([cont = std::move(cont)](Result<std::monostate> result) mutable {
-                     cont(std::move(result));
+                   lqtexec::then_on(drainHopScope(), [self, finish](Result<std::monostate> result) {
+                     if (self->phase != Draining)
+                       return; // superseded / cancelled rebuild
+                     if (auto e = std::get_if<RenderError>(&result)) {
+                       self->phase = DrainFailed;
+                       self->report(*e);
+                       // Fail-closed: retain target/path until explicit retry (resume+stop).
+                       return;
+                     }
+                     finish();
                    });
       lexec::spawn(std::move(chain) | lexec::upon_error([self](std::exception_ptr) noexcept {
-                     self->phase = DrainFailed;
-                     self->report(issue(ErrorStage::Shutdown, "soft drain dispatch failed", "exception"));
+                     self->guiDrainFault("soft drain dispatch failed", "exception");
                    }),
                    root.get_token());
       return;
@@ -400,61 +418,52 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     receiptWaitStarted.reset();
     phase = Draining;
     auto self = shared_from_this();
-    // Sender launches beginDrain; control() GUI hop survives ~RenderSession uiScope reset.
-    auto afterDrain = control([](Impl &s, auto drainResult) {
-      if (s.phase != Draining)
+    // Hard: drain | then_on(destroy) | releasePathSender | then_on(create/finish-stop).
+    auto chain = workflows::drainThenOnGui(*adapter, drainHopScope(), [self](Result<std::monostate> drainResult) {
+      if (self->phase != Draining)
         return;
       if (auto e = std::get_if<RenderError>(&drainResult)) {
-        s.phase = DrainFailed;
-        s.report(*e);
+        self->phase = DrainFailed;
+        self->report(*e);
+        // Fail-closed: retain target until explicit retry — do not destroyResources here.
         return;
       }
       try {
-        s.phase = Releasing;
-        s.destroyTarget();
+        self->phase = Releasing;
+        self->destroyTarget();
       } catch (std::exception const &ex) {
-        s.phase = DrainFailed;
-        s.report(issue(ErrorStage::Shutdown, "target destruction failed", ex.what()));
+        self->phase = DrainFailed;
+        self->report(issue(ErrorStage::Shutdown, "target destruction failed", ex.what()));
         return;
       }
-      auto afterRelease = s.control([](Impl &s, auto releaseResult) {
-        if (s.phase != Releasing)
+      auto release = workflows::releaseThenOnGui(*self->adapter, self->drainHopScope(), [self](Result<std::monostate> releaseResult) {
+        if (self->phase != Releasing)
           return;
         if (auto e = std::get_if<RenderError>(&releaseResult)) {
-          s.phase = DrainFailed;
-          s.report(*e);
+          self->phase = DrainFailed;
+          self->report(*e);
+          // Fail-closed: retain host until explicit retry.
           return;
         }
-        s.phase = Idle;
-        s.rebuild = false;
-        s.hardRebuild = false;
-        s.pathPrepared = false;
-        if (s.stopRequested) {
-          if (s.resourcesGone)
-            s.finishScopes();
+        self->phase = Idle;
+        self->rebuild = false;
+        self->hardRebuild = false;
+        self->pathPrepared = false;
+        if (self->stopRequested) {
+          if (self->resourcesGone)
+            self->finishScopes();
           else
-            s.destroyResources(false);
+            self->destroyResources(false);
         } else
-          s.queueTick();
+          self->queueTick(); // Idle → prepare() creates fresh target/path
       });
-      auto release = workflows::releasePathSender(*s.adapter) |
-                     lexec::then([afterRelease = std::move(afterRelease)](Result<std::monostate> r) mutable {
-                       afterRelease(std::move(r));
-                     });
-      auto keep = s.shared_from_this();
-      lexec::spawn(std::move(release) | lexec::upon_error([keep](std::exception_ptr) noexcept {
-                     keep->phase = DrainFailed;
-                     keep->report(issue(ErrorStage::Shutdown, "release dispatch failed", "exception"));
+      lexec::spawn(std::move(release) | lexec::upon_error([self](std::exception_ptr) noexcept {
+                     self->guiDrainFault("release dispatch failed", "exception");
                    }),
-                   keep->root.get_token());
+                   self->root.get_token());
     });
-    auto chain = workflows::beginDrainSender(*adapter) |
-                 lexec::then([afterDrain = std::move(afterDrain)](Result<std::monostate> r) mutable {
-                   afterDrain(std::move(r));
-                 });
     lexec::spawn(std::move(chain) | lexec::upon_error([self](std::exception_ptr) noexcept {
-                   self->phase = DrainFailed;
-                   self->report(issue(ErrorStage::Shutdown, "hard drain dispatch failed", "exception"));
+                   self->guiDrainFault("hard drain dispatch failed", "exception");
                  }),
                  root.get_token());
   }

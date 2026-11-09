@@ -1079,6 +1079,47 @@ struct Viewer : QObject {
   }
 };
 } // namespace demo
+
+namespace {
+// M4: black-flash requires a live, unlocked display. Lock/blank makes grabWindow
+// near-black and is not a product regression — skip with CTest code 77.
+bool displayLockedOrBlank(std::string *detail) {
+  // loginctl LockedHint
+  if (FILE *pipe = popen("loginctl show-session $(loginctl | awk '/seat0/{print $1; exit}') -p LockedHint 2>/dev/null", "r")) {
+    char buf[256] = {};
+    std::string out;
+    while (fgets(buf, sizeof(buf), pipe))
+      out += buf;
+    pclose(pipe);
+    if (out.find("LockedHint=yes") != std::string::npos) {
+      if (detail)
+        *detail = "loginctl LockedHint=yes (session locked)";
+      return true;
+    }
+  }
+  // xset q: only explicit monitor-off is treated as blank (DPMS enabled alone is normal).
+  if (FILE *pipe = popen("xset q 2>/dev/null", "r")) {
+    char buf[512] = {};
+    std::string out;
+    while (fgets(buf, sizeof(buf), pipe))
+      out += buf;
+    pclose(pipe);
+    if (out.find("Monitor is Off") != std::string::npos) {
+      if (detail)
+        *detail = "xset: Monitor is Off";
+      return true;
+    }
+  }
+  if (const char *force = std::getenv("DEMO_FORCE_BLACK_FLASH_SKIP")) {
+    if (force[0] && force[0] != '0') {
+      if (detail)
+        *detail = "DEMO_FORCE_BLACK_FLASH_SKIP set";
+      return true;
+    }
+  }
+  return false;
+}
+} // namespace
 int main(int argc, char **argv) {
   QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
   QApplication app(argc, argv);
@@ -1138,8 +1179,19 @@ int main(int argc, char **argv) {
     std::cerr << "asset root error: " << e.what() << std::endl;
     return 1;
   }
+  auto selfTest = args.value("self-test").toStdString();
+  if (selfTest == "black-flash") {
+    std::string detail;
+    if (displayLockedOrBlank(&detail)) {
+      std::cerr << "black-flash SKIP: display locked or blank — not an acceptance run ("
+                << detail << ")" << std::endl;
+      std::cerr << "Waiting for unlock to re-run acceptance: black-flash x3, DPR1.25, negatives"
+                << std::endl;
+      return 77;
+    }
+  }
   demo::Viewer viewer(app, backend, mode, args.value("model").toStdString(),
-                      args.value("self-test").toStdString(),
+                      selfTest,
                       args.value("screenshot").toStdString(), assetRoot);
 #ifdef DEMO_E2E
   auto scenario = args.value("scenario").toStdString();

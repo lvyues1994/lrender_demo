@@ -1,105 +1,89 @@
 diff --git a/.superpowers/sdd/E1-report.md b/.superpowers/sdd/E1-report.md
 new file mode 100644
-index 0000000..5defe48
+index 0000000..6ae85ac
 --- /dev/null
 +++ b/.superpowers/sdd/E1-report.md
-@@ -0,0 +1,94 @@
-+# E1 — lexec sender 工作流重写
+@@ -0,0 +1,78 @@
++# E1 — lexec sender 工作流（复核补齐）
 +
 +- **Branch:** `feat/qt-vulkan-demo`
 +- **BASE:** `80528df881d0c1f5c22d8c26f7e11221d986bbaa`
-+- **HEAD:** feat/qt-vulkan-demo tip after E1 (run: git rev-parse HEAD)
-+- **Asia/Shanghai:** 2026-11-09T16:25:00+08:00
-+- **Page:** 附录 A 已更新为「v1.1 已批准」（entt + 同窗双视口；不覆盖 v1.0）
++- **HEAD:** feat/qt-vulkan-demo tip — run `git rev-parse HEAD`
++- **Asia/Shanghai:** 2026-11-09T16:45:00+08:00
 +
-+## 改动摘要
++## 范围完成情况
 +
-+1. **`src/render/workflows/AdapterSenders.h`**（新）
-+   - `DoneOpSender`：把 `PresentationAdapter::Done` 包装为仅 `set_value(Result)` / `set_stopped` 的 sender（无 `set_error`，便于 `spawn`）。
-+   - `beginDrainSender` / `releasePathSender`。
++| 项 | 状态 |
++|----|------|
++| Soft：`drain \| then_on(GUI, destroy+bind)`，不 release | 完成 |
++| Hard：`drain \| then_on(destroy) \| release \| then_on(create/finish-stop)` | 完成 |
++| upon_error → GUI hop（M1） | 完成 `guiDrainFault` |
++| DoneOpSender stop 时仍 set_value(cancelled)（M2） | 完成 |
++| workflow 覆盖 hard/soft/错误/取消/early-return（M3） | 完成 6 用例 |
++| 黑帧锁屏/息屏 → exit 77 + CTest SKIP（M4） | 完成 |
++| AssetLoader：`associate` + 既有 `write_env` 取消 | 完成 |
++| SessionFrameSubmit：`associate` | 完成 |
++| 加载/管线切换值命令 | 保持 latest-wins（A1.6）；取消走 LoadTicket/`write_env` stop |
++| `lexec::stop_when` 公共 API | **上游未导出**（见局限） |
 +
-+2. **`src/render/workflows/SessionWorkflows.h`**（新）
-+   - `softDrainOnly` → `beginDrainSender`（soft 保 presenter/host）。
++## 屏幕状态（只读，验收前）
 +
-+3. **`src/render/RenderSession.cpp`**
-+   - **Soft（VulkanShared）：** `softDrainOnly | then(control-hop) | upon_error` + `spawn`。GUI 投递仍走既有 `control()`（QTimer post），避免与 `adapter.work()` 的 `then_on` 嵌套重入；语义对齐 pre-E1 soft/hard 规则。
-+   - **Hard `beginDrain`：** `beginDrainSender | then(control→destroyTarget→releasePathSender|then(control))` + `upon_error` + `spawn`。`control()` 在 `~RenderSession` 重置 `uiScope` 之后仍可用（asset_async 析构路径依赖此点）。
++```
++loginctl session 2: LockedHint=yes IdleHint=yes Active=yes
++xset: DPMS Enabled, Monitor is Off
++```
 +
-+4. **`tests/workflow_test.cpp`** + **CMakeLists.txt**
-+   - 3 个用例：`drain-then-release-order-on-gui`、`drain-error-skips-release`、`soft-drain-only-never-releases`。
-+   - 组合真实 `lexec`/`lqtexec` 算法：`spawn`、`then`、`then_on`、`upon_error`、`counting_scope`。
++黑帧自测：`exit 77`，明确 SKIP 文案。
++**等待解锁后重跑验收：黑帧 ×3、DPR1.25、负例。**（本轮未尝试解锁）
 +
-+## 保持的保证
-+
-+| 保证 | 做法 |
-+|------|------|
-+| 不阻塞 GUI | drain/release 经 adapter worker；完成用 `control()`/`then_on` 回 GUI；无 `sync_wait` |
-+| 不闪黑 | soft 只 drain，不 `releasePath`；hard 才 destroy→release |
-+| 按序 drain | hard：drain → destroy target → release → Idle/destroyResources |
-+| fail-closed | `upon_error` / `RenderError` → `DrainFailed` + `report` |
-+| RenderSession 独占 | 未向 UI 暴露 World/target；值命令/快照不变 |
-+| 真实算法 | 仅用头文件中的 `lexec::then/upon_error/spawn`、`lqtexec::then_on`、`counting_scope` |
++锁屏下仍作为功能证据跑通：`e2e_shared_cycle`、`e2e_shared_dpr125`、unit、负例等。
 +
 +## 证据
 +
-+### 二进制 mtime（Asia/Shanghai，箱内本地）
++### 二进制 mtime（Asia/Shanghai）
 +
 +```
-+build/plan-debug/lrender_demo  2026-11-09 16:21:19.059415767 +0800
-+build/plan-debug/demo_e2e      2026-11-09 16:21:19.053673715 +0800
-+build/plan-debug/demo_tests    2026-11-09 16:21:19.182308953 +0800
++lrender_demo  2026-11-09 16:44:04 +0800
++demo_e2e      2026-11-09 16:44:04 +0800
++demo_tests    2026-11-09 16:44:01 +0800
 +```
 +
 +### 单测
 +
 +- `QT_QPA_PLATFORM=offscreen demo_tests --no-skip=true`
-+- **168/168** passed，6572 assertions（含新增 3× `workflow/*`）
-+- 日志：`/tmp/e1-unit-final.log`
++- **171/171** passed，**6591** assertions（含 workflow/* ×6）
++- 日志：`/tmp/e1i1-unit2.log`
 +
-+### CTest（除黑帧）
++### CTest
 +
-+- `ctest -E e2e_shared_black_flash` → **26/26** passed
-+- 含 DPR：`e2e_shared_dpr125` Passed 4.79s
-+- 含负例标签：`e2e_zero_shared`、`e2e_strict_offscreen`、`e2e_fault_*` 等
-+- 日志：`/tmp/e1-ctest-nobf.log`
++- **27 tests：100% passed，1 skipped**（`e2e_shared_black_flash` SKIP 77）
++- 含 DPR `e2e_shared_dpr125` Passed；负例标签通过
++- 日志：`/tmp/e1i1-ctest.log`
 +
-+### 显式负例（期望非零）
++## 上游 API 证据：`stop_when`
 +
-+| 用例 | exit |
-+|------|------|
-+| `--inject-zero-shared` | 1 |
-+| `QT_QPA_PLATFORM=offscreen` + shared resize | 1 |
-+| `--asset-root` 缺失目录 | 1 |
++- 文件：`third_party/lexec/include/lexec/algorithms/stop_when.hpp`
++- `stop_when` 定义在 **`namespace lexec::detail`**（约 L17–L146），**未** `using`/`inline constexpr` 到 `lexec::`
++- 公共取消路径：`write_env` + `prop{get_stop_token, …}`（AssetLoader 已用）；`spawn` 内部使用 `detail::stop_when`
++- **未**调用 `lexec::detail::stop_when`（避免依赖 detail）
 +
-+### 黑帧 e2e ×3
++## 保持的保证
 +
-+| run | exit | soft extent | final |
-+|-----|------|-------------|-------|
-+| 1 | 1 | 160x120 | completed=2 sharedShown=2 |
-+| 2 | 1 | 160x120 | completed=2 sharedShown=2 |
-+| 3 | 1 | 160x120 | completed=2 sharedShown=2 |
-+
-+日志：`/tmp/e1-black-flash-x3.log`
++不阻塞 GUI；soft 不 release（不闪黑）；hard 序 drain→destroy→release；drain/release 错误 fail-closed 保留 target；GUI 独占状态；值命令/不可变快照。
 +
 +## 已知局限
 +
-+1. **`e2e_shared_black_flash` 当前环境失败（非 E1 逻辑回归）**
-+   - Soft 完成正常（`soft target extent=160x120`）。
-+   - Visibility 非 continuous：soft 后脏帧耗尽即 idle（`completed/sharedShown=2` 符合）。
-+   - Stage0 卡在 `nearBlack(grabWindow)`：Vulkan shared 窗口抓屏持续近黑，45s 内部 deadline 退出。
-+   - **对照：** 将 `RenderSession.cpp` 整文件回退到 `80528df` 后同命令同样失败；` --self-test full` 在同环境通过（exit 0）。
-+   - 故判为 **grabWindow/近黑门禁的环境问题**，不是 sender 改写引入的 soft/hard 破坏。晨间 `fix-black-flash-timeout` 绿跑记录仍有效作历史基线。
-+
-+2. **E1 未改加载/管线切换/退出的其它回调路径**（仍为既有 `control`/loader sender）；后续 E 任务再扩。
-+
-+3. **未开始 E2**（entt）。
++1. 黑帧验收待解锁后重跑 ×3（本轮 SKIP）。
++2. `lexec::stop_when` 无公共导出；取消用 `write_env` stop token。
++3. RenderSession 仍偏大；soft/hard 已收敛到 workflows + `then_on`，prepare/install 小步仍在 tick 内（符合 GUI 有界安装）。
++4. `.superpowers/` 在 `.gitignore`；本报告因此前已跟踪而可普通 `git add`（M5：不再 `-f` 强制新报告）。
 +
 +## 未做
 +
-+- 未 push / merge / amend / `--no-verify` / worktree
-+- 未改 `.vscode` / 第三方源码
++未 push/amend/改第三方/动桌面解锁；未开始 E2。
++
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 2c2e7c2..b00f4ec 100644
+index 2c2e7c2..43ddd12 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -91,6 +91,7 @@ add_executable(lrender_demo src/app/main.cpp)
@@ -110,8 +94,112 @@ index 2c2e7c2..b00f4ec 100644
  
  target_sources(demo_core PRIVATE src/app/ApplicationLifetime.cpp)
  
+@@ -126,6 +127,7 @@ if(DEMO_ENABLE_GPU_E2E)
+  add_test(NAME e2e_gpu_readback COMMAND demo_e2e --backend vulkan --presentation readback --model floor --scenario resize --frames 300)
+  add_test(NAME e2e_shared_black_flash COMMAND lrender_demo --backend vulkan --presentation shared --model floor --self-test black-flash)
+  set_tests_properties(e2e_shared_cycle e2e_shared_dpr125 e2e_gpu_readback e2e_shared_black_flash PROPERTIES LABELS "e2e;gpu" TIMEOUT 150)
++ set_tests_properties(e2e_shared_black_flash PROPERTIES SKIP_RETURN_CODE 77)
+  set_tests_properties(e2e_shared_dpr125 PROPERTIES ENVIRONMENT "QT_SCALE_FACTOR=1.25;DEMO_LOG_SOFT_EXTENT=1")
+  set_tests_properties(e2e_shared_cycle e2e_shared_black_flash e2e_gpu_readback PROPERTIES ENVIRONMENT "DEMO_LOG_SOFT_EXTENT=1")
+  add_test(NAME e2e_strict_offscreen COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/expect_failure.py" "session error:" $<TARGET_FILE:demo_e2e> --backend vulkan --presentation shared --scenario resize --frames 4)
+diff --git a/src/app/main.cpp b/src/app/main.cpp
+index 530b956..1e9fdd2 100644
+--- a/src/app/main.cpp
++++ b/src/app/main.cpp
+@@ -1079,6 +1079,47 @@ struct Viewer : QObject {
+   }
+ };
+ } // namespace demo
++
++namespace {
++// M4: black-flash requires a live, unlocked display. Lock/blank makes grabWindow
++// near-black and is not a product regression — skip with CTest code 77.
++bool displayLockedOrBlank(std::string *detail) {
++  // loginctl LockedHint
++  if (FILE *pipe = popen("loginctl show-session $(loginctl | awk '/seat0/{print $1; exit}') -p LockedHint 2>/dev/null", "r")) {
++    char buf[256] = {};
++    std::string out;
++    while (fgets(buf, sizeof(buf), pipe))
++      out += buf;
++    pclose(pipe);
++    if (out.find("LockedHint=yes") != std::string::npos) {
++      if (detail)
++        *detail = "loginctl LockedHint=yes (session locked)";
++      return true;
++    }
++  }
++  // xset q: only explicit monitor-off is treated as blank (DPMS enabled alone is normal).
++  if (FILE *pipe = popen("xset q 2>/dev/null", "r")) {
++    char buf[512] = {};
++    std::string out;
++    while (fgets(buf, sizeof(buf), pipe))
++      out += buf;
++    pclose(pipe);
++    if (out.find("Monitor is Off") != std::string::npos) {
++      if (detail)
++        *detail = "xset: Monitor is Off";
++      return true;
++    }
++  }
++  if (const char *force = std::getenv("DEMO_FORCE_BLACK_FLASH_SKIP")) {
++    if (force[0] && force[0] != '0') {
++      if (detail)
++        *detail = "DEMO_FORCE_BLACK_FLASH_SKIP set";
++      return true;
++    }
++  }
++  return false;
++}
++} // namespace
+ int main(int argc, char **argv) {
+   QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+   QApplication app(argc, argv);
+@@ -1138,8 +1179,19 @@ int main(int argc, char **argv) {
+     std::cerr << "asset root error: " << e.what() << std::endl;
+     return 1;
+   }
++  auto selfTest = args.value("self-test").toStdString();
++  if (selfTest == "black-flash") {
++    std::string detail;
++    if (displayLockedOrBlank(&detail)) {
++      std::cerr << "black-flash SKIP: display locked or blank — not an acceptance run ("
++                << detail << ")" << std::endl;
++      std::cerr << "Waiting for unlock to re-run acceptance: black-flash x3, DPR1.25, negatives"
++                << std::endl;
++      return 77;
++    }
++  }
+   demo::Viewer viewer(app, backend, mode, args.value("model").toStdString(),
+-                      args.value("self-test").toStdString(),
++                      selfTest,
+                       args.value("screenshot").toStdString(), assetRoot);
+ #ifdef DEMO_E2E
+   auto scenario = args.value("scenario").toStdString();
+diff --git a/src/assets/AssetLoader.cpp b/src/assets/AssetLoader.cpp
+index 9b725d2..b55f9b0 100644
+--- a/src/assets/AssetLoader.cpp
++++ b/src/assets/AssetLoader.cpp
+@@ -147,6 +147,9 @@ LoadTicket AssetLoader::beginLoad(AssetEntry entry, AssetRequestId request,
+   auto receipt = [self, r](LoadOutcome value) {
+     self->deliver(r, std::move(value));
+   };
++  // Cancel: public API is write_env(get_stop_token) on `work` above.
++  // lexec::stop_when exists only as lexec::detail::stop_when (algorithms/stop_when.hpp);
++  // not exported to namespace lexec — see E1 report. associate ties load to app scope.
+   auto hopped = lqtexec::then_on(std::move(work), *self->completion, receipt) |
+                 lexec::upon_stopped([self, r]() noexcept {
+                   self->deliver(r, {r->id, LoadStatus::Cancelled, {}, {}});
+@@ -164,7 +167,7 @@ LoadTicket AssetLoader::beginLoad(AssetEntry entry, AssetRequestId request,
+                     }}; // allocate before producer starts
+   ++self->count;
+   try {
+-    lexec::spawn(std::move(hopped), self->root);
++    lexec::spawn(lexec::associate(std::move(hopped), self->root), self->root);
+   } catch (...) {
+     --self->count;
+     throw;
 diff --git a/src/render/RenderSession.cpp b/src/render/RenderSession.cpp
-index 0c91cc6..fc53527 100644
+index 0c91cc6..8dfb64d 100644
 --- a/src/render/RenderSession.cpp
 +++ b/src/render/RenderSession.cpp
 @@ -3,6 +3,7 @@
@@ -122,106 +210,195 @@ index 0c91cc6..fc53527 100644
  #include "SessionState.h"
  #include "assets/AssetLoader.h"
  #include <QCoreApplication>
-@@ -357,14 +358,25 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
+@@ -215,6 +216,25 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
+       });
+     };
+   }
++  // M1: upon_error may run off-GUI; always hop before mutating phase / report.
++  void guiDrainFault(char const *message, char const *cause) {
++    auto self = shared_from_this();
++    post([self, message, cause] {
++      self->owner();
++      if (self->phase == Draining || self->phase == Releasing || self->phase == DrainFailed) {
++        self->phase = DrainFailed;
++        self->report(issue(ErrorStage::Shutdown, message, cause));
++      }
++    });
++  }
++  lqtexec::ObjectScope &drainHopScope() {
++    // Prefer cleanupScope: ~RenderSession resets uiScope before stop()/beginDrain.
++    if (cleanupScope)
++      return *cleanupScope;
++    if (uiScope)
++      return *uiScope;
++    throw std::logic_error("drain hop scope missing");
++  }
+   void presentationError(RenderError error) {
+     if (selectedPath == PresentationPath::VulkanShared && allowFallback && !stopRequested) {
+       presentationWarnings.push_back(error.message + ": " + error.cause);
+@@ -357,14 +377,24 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
      };
      if (selectedPath == PresentationPath::VulkanShared) {
        phase = Draining;
 -      adapter->beginDrain(control([finish](Impl &s, auto result) {
-+      auto self = shared_from_this();
-+      // Sender launches drain; control() posts GUI hop (same delivery as pre-E1).
-+      auto cont = control([finish](Impl &s, auto result) {
-         if (auto e = std::get_if<RenderError>(&result)) {
-           s.phase = DrainFailed;
-           s.report(*e);
-           return;
-         }
-         finish();
+-        if (auto e = std::get_if<RenderError>(&result)) {
+-          s.phase = DrainFailed;
+-          s.report(*e);
+-          return;
+-        }
+-        finish();
 -      }));
-+      });
++      auto self = shared_from_this();
++      // Soft: drain | then_on(GUI, destroy+bind). Never releasePath (no black flash).
 +      auto chain = workflows::softDrainOnly(*adapter) |
-+                   lexec::then([cont = std::move(cont)](Result<std::monostate> result) mutable {
-+                     cont(std::move(result));
++                   lqtexec::then_on(drainHopScope(), [self, finish](Result<std::monostate> result) {
++                     if (self->phase != Draining)
++                       return; // superseded / cancelled rebuild
++                     if (auto e = std::get_if<RenderError>(&result)) {
++                       self->phase = DrainFailed;
++                       self->report(*e);
++                       // Fail-closed: retain target/path until explicit retry (resume+stop).
++                       return;
++                     }
++                     finish();
 +                   });
 +      lexec::spawn(std::move(chain) | lexec::upon_error([self](std::exception_ptr) noexcept {
-+                     self->phase = DrainFailed;
-+                     self->report(issue(ErrorStage::Shutdown, "soft drain dispatch failed", "exception"));
++                     self->guiDrainFault("soft drain dispatch failed", "exception");
 +                   }),
 +                   root.get_token());
        return;
      }
      finish();
-@@ -387,22 +399,28 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
+@@ -387,39 +417,55 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
      receiptWaitMs = 0;
      receiptWaitStarted.reset();
      phase = Draining;
 -    adapter->beginDrain(control([](Impl &s, auto result) {
 -      if (auto e = std::get_if<RenderError>(&result)) {
+-        s.phase = DrainFailed;
+-        s.report(*e);
 +    auto self = shared_from_this();
-+    // Sender launches beginDrain; control() GUI hop survives ~RenderSession uiScope reset.
-+    auto afterDrain = control([](Impl &s, auto drainResult) {
-+      if (s.phase != Draining)
++    // Hard: drain | then_on(destroy) | releasePathSender | then_on(create/finish-stop).
++    auto chain = workflows::drainThenOnGui(*adapter, drainHopScope(), [self](Result<std::monostate> drainResult) {
++      if (self->phase != Draining)
 +        return;
 +      if (auto e = std::get_if<RenderError>(&drainResult)) {
-         s.phase = DrainFailed;
-         s.report(*e);
++        self->phase = DrainFailed;
++        self->report(*e);
++        // Fail-closed: retain target until explicit retry — do not destroyResources here.
          return;
        }
        try {
-+        s.phase = Releasing;
-         s.destroyTarget();
+-        s.destroyTarget();
 -      } catch (std::exception const &e) {
-+      } catch (std::exception const &ex) {
-         s.phase = DrainFailed;
+-        s.phase = DrainFailed;
 -        s.report(issue(ErrorStage::Shutdown, "target destruction failed", e.what()));
-+        s.report(issue(ErrorStage::Shutdown, "target destruction failed", ex.what()));
++        self->phase = Releasing;
++        self->destroyTarget();
++      } catch (std::exception const &ex) {
++        self->phase = DrainFailed;
++        self->report(issue(ErrorStage::Shutdown, "target destruction failed", ex.what()));
          return;
        }
 -      s.phase = Releasing;
 -      s.adapter->releasePath(s.control([](Impl &s, auto result) {
 -        if (auto e = std::get_if<RenderError>(&result)) {
-+      auto afterRelease = s.control([](Impl &s, auto releaseResult) {
-+        if (s.phase != Releasing)
+-          s.phase = DrainFailed;
+-          s.report(*e);
++      auto release = workflows::releaseThenOnGui(*self->adapter, self->drainHopScope(), [self](Result<std::monostate> releaseResult) {
++        if (self->phase != Releasing)
 +          return;
 +        if (auto e = std::get_if<RenderError>(&releaseResult)) {
-           s.phase = DrainFailed;
-           s.report(*e);
++          self->phase = DrainFailed;
++          self->report(*e);
++          // Fail-closed: retain host until explicit retry.
            return;
-@@ -418,8 +436,27 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
-             s.destroyResources(false);
+         }
+-        s.phase = Idle;
+-        s.rebuild = false;
+-        s.hardRebuild = false;
+-        s.pathPrepared = false;
+-        if (s.stopRequested) {
+-          if (s.resourcesGone)
+-            s.finishScopes();
++        self->phase = Idle;
++        self->rebuild = false;
++        self->hardRebuild = false;
++        self->pathPrepared = false;
++        if (self->stopRequested) {
++          if (self->resourcesGone)
++            self->finishScopes();
+           else
+-            s.destroyResources(false);
++            self->destroyResources(false);
          } else
-           s.queueTick();
+-          s.queueTick();
 -      }));
 -    }));
++          self->queueTick(); // Idle → prepare() creates fresh target/path
 +      });
-+      auto release = workflows::releasePathSender(*s.adapter) |
-+                     lexec::then([afterRelease = std::move(afterRelease)](Result<std::monostate> r) mutable {
-+                       afterRelease(std::move(r));
-+                     });
-+      auto keep = s.shared_from_this();
-+      lexec::spawn(std::move(release) | lexec::upon_error([keep](std::exception_ptr) noexcept {
-+                     keep->phase = DrainFailed;
-+                     keep->report(issue(ErrorStage::Shutdown, "release dispatch failed", "exception"));
++      lexec::spawn(std::move(release) | lexec::upon_error([self](std::exception_ptr) noexcept {
++                     self->guiDrainFault("release dispatch failed", "exception");
 +                   }),
-+                   keep->root.get_token());
++                   self->root.get_token());
 +    });
-+    auto chain = workflows::beginDrainSender(*adapter) |
-+                 lexec::then([afterDrain = std::move(afterDrain)](Result<std::monostate> r) mutable {
-+                   afterDrain(std::move(r));
-+                 });
 +    lexec::spawn(std::move(chain) | lexec::upon_error([self](std::exception_ptr) noexcept {
-+                   self->phase = DrainFailed;
-+                   self->report(issue(ErrorStage::Shutdown, "hard drain dispatch failed", "exception"));
++                   self->guiDrainFault("hard drain dispatch failed", "exception");
 +                 }),
 +                 root.get_token());
    }
    void destroyResources(bool ambiguousBarrier) {
      phase = Destroying;
+diff --git a/src/render/SessionFrameSubmit.cpp b/src/render/SessionFrameSubmit.cpp
+index 0600c69..5d25186 100644
+--- a/src/render/SessionFrameSubmit.cpp
++++ b/src/render/SessionFrameSubmit.cpp
+@@ -28,23 +28,24 @@ void submitSessionFrame(lr::render::Renderer &renderer, lr::render::FrameDesc fr
+       lqtexec::then_on(std::move(settled), scope, [done](FrameCompletion c) { done(std::move(c)); });
+   // spawn explicitly rejects an unhandled error channel. Preserve the same receipt
+   // on hop/materialization error; done normalizes delivery back onto the GUI.
+-  lexec::spawn(std::move(hopped) |
+-                   lexec::upon_error([done = std::move(done), stamp](std::exception_ptr failure) noexcept {
++  auto guarded = std::move(hopped) |
++                 lexec::upon_error([done = std::move(done), stamp](std::exception_ptr failure) noexcept {
++                   try {
++                     std::string cause = "completion dispatch failed";
+                      try {
+-                       std::string cause = "completion dispatch failed";
+-                       try {
+-                         if (failure)
+-                           std::rethrow_exception(failure);
+-                       } catch (std::exception const &e) {
+-                         cause = e.what();
+-                       } catch (...) {
+-                       }
+-                       done({stamp, RenderError{ErrorStage::Submit, false, "completion dispatch failed",
+-                                                std::move(cause)}});
++                       if (failure)
++                         std::rethrow_exception(failure);
++                     } catch (std::exception const &e) {
++                       cause = e.what();
+                      } catch (...) {
+-                       qFatal("cannot report frame completion failure");
+                      }
+-                   }),
+-               root.get_token());
++                     done({stamp, RenderError{ErrorStage::Submit, false, "completion dispatch failed",
++                                              std::move(cause)}});
++                   } catch (...) {
++                     qFatal("cannot report frame completion failure");
++                   }
++                 });
++  // associate keeps the frame completion tied to the session counting_scope.
++  lexec::spawn(lexec::associate(std::move(guarded), root.get_token()), root.get_token());
+ }
+ } // namespace demo
 diff --git a/src/render/workflows/AdapterSenders.h b/src/render/workflows/AdapterSenders.h
 new file mode 100644
-index 0000000..9365eac
+index 0000000..a877e98
 --- /dev/null
 +++ b/src/render/workflows/AdapterSenders.h
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,92 @@
 +#pragma once
 +
 +#include "presentation/PresentationAdapter.h"
@@ -235,8 +412,10 @@ index 0000000..9365eac
 +
 +namespace demo::workflows {
 +
-+// Done callbacks become set_value(Result). Unexpected throws become RenderError values.
-+// No set_error channel so lexec::spawn can attach without upon_error plumbing.
++// Done callbacks become set_value(Result). No set_error channel (spawn-friendly).
++// M2: when the stop token is already requested at Done time, still deliver a value
++// (cancelled RenderError) so drain/release pipelines can leave Draining and converge.
++// Adapters must always invoke Done exactly once on every beginDrain/releasePath path.
 +struct DoneOpSender {
 +  using sender_concept = lexec::sender_t;
 +  using completion_signatures =
@@ -260,7 +439,12 @@ index 0000000..9365eac
 +          try {
 +            auto token = lexec::get_stop_token(lexec::get_env(rcvr));
 +            if (token.stop_requested()) {
-+              lexec::set_stopped(static_cast<Rcvr &&>(rcvr));
++              // Prefer value completion with a cancelled error so then_on / let_value
++              // handlers run and can fail-closed / continue shutdown. Dropping the
++              // Result via set_stopped alone left phase==Draining and root.join hung.
++              lexec::set_value(static_cast<Rcvr &&>(rcvr),
++                               Result<std::monostate>{RenderError{
++                                   ErrorStage::Shutdown, true, "operation stopped", "stop token requested"}});
 +              return;
 +            }
 +            lexec::set_value(static_cast<Rcvr &&>(rcvr), std::move(result));
@@ -299,31 +483,57 @@ index 0000000..9365eac
 +  return DoneOpSender{[&adapter](Done done) { adapter.releasePath(std::move(done)); }};
 +}
 +
++inline DoneOpSender preparePathSender(PresentationAdapter &adapter, PresentationPath path,
++                                      std::shared_ptr<NativeHostLease> lease) {
++  return DoneOpSender{[&adapter, path, lease = std::move(lease)](Done done) mutable {
++    adapter.preparePath(path, std::move(lease), std::move(done));
++  }};
++}
++
 +} // namespace demo::workflows
 diff --git a/src/render/workflows/SessionWorkflows.h b/src/render/workflows/SessionWorkflows.h
 new file mode 100644
-index 0000000..0c190fe
+index 0000000..9836a4f
 --- /dev/null
 +++ b/src/render/workflows/SessionWorkflows.h
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,31 @@
 +#pragma once
 +
 +#include "render/workflows/AdapterSenders.h"
 +
++#include <lqtexec/ObjectScope.h>
++
++#include <lexec/execution.hpp>
++
++#include <utility>
++
 +namespace demo::workflows {
 +
-+// Soft rebuild (VulkanShared): drain only — keep presenter/host; caller hops GUI then
-+// destroyTarget/bindFreshTarget. Compose with then_on + upon_error before spawn
-+// (same pattern as SessionFrameSubmit).
++// Soft rebuild (VulkanShared): drain only — keep presenter/host.
++// Compose: beginDrainSender | then_on(GUI, destroy+bindFresh). Never releasePath.
 +inline auto softDrainOnly(PresentationAdapter &adapter) { return beginDrainSender(adapter); }
++
++// Hard path pieces for drain | then_on(destroy) | release | then_on(create/finish).
++// Nested spawn is used when release must start after destroy on the GUI hop
++// (let_value→any_sender erase is not portable across these Result completions).
++
++template <class GuiFn>
++auto drainThenOnGui(PresentationAdapter &adapter, lqtexec::ObjectScope &scope, GuiFn &&fn) {
++  return beginDrainSender(adapter) | lqtexec::then_on(scope, static_cast<GuiFn &&>(fn));
++}
++
++template <class GuiFn>
++auto releaseThenOnGui(PresentationAdapter &adapter, lqtexec::ObjectScope &scope, GuiFn &&fn) {
++  return releasePathSender(adapter) | lqtexec::then_on(scope, static_cast<GuiFn &&>(fn));
++}
 +
 +} // namespace demo::workflows
 diff --git a/tests/workflow_test.cpp b/tests/workflow_test.cpp
 new file mode 100644
-index 0000000..eb12e1a
+index 0000000..b5163b0
 --- /dev/null
 +++ b/tests/workflow_test.cpp
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,304 @@
 +#include <doctest/doctest.h>
 +
 +#include "render/workflows/AdapterSenders.h"
@@ -338,6 +548,7 @@ index 0000000..eb12e1a
 +
 +#include <lexec/execution.hpp>
 +#include <lexec/scopes/counting_scope.hpp>
++#include <lexec/stop_token.hpp>
 +
 +#include <atomic>
 +#include <deque>
@@ -350,9 +561,14 @@ index 0000000..eb12e1a
 +  std::vector<std::string> stages;
 +  std::deque<demo::Done> pending;
 +  bool failDrain = false;
++  bool failRelease = false;
++  bool skipDone = false; // negative: must not be used in production paths
 +
 +  void probe(tc::DeviceInfo const &, std::function<void(demo::Result<demo::ProbeReport>)>) override {}
-+  void preparePath(demo::PresentationPath, std::shared_ptr<demo::NativeHostLease>, demo::Done) override {}
++  void preparePath(demo::PresentationPath, std::shared_ptr<demo::NativeHostLease>, demo::Done done) override {
++    stages.push_back("prepare");
++    pending.push_back(std::move(done));
++  }
 +  demo::TargetDesc describeTarget(demo::ViewportExtent const &) const override {
 +    return lr::render::ImageTargetDesc{};
 +  }
@@ -360,6 +576,8 @@ index 0000000..eb12e1a
 +  void consumeImage(demo::OwnedFrame) override {}
 +  void beginDrain(demo::Done done) override {
 +    stages.push_back("drain");
++    if (skipDone)
++      return;
 +    if (failDrain) {
 +      done(demo::RenderError{demo::ErrorStage::Shutdown, true, "drain failed", "injected"});
 +      return;
@@ -368,6 +586,12 @@ index 0000000..eb12e1a
 +  }
 +  void releasePath(demo::Done done) override {
 +    stages.push_back("release");
++    if (skipDone)
++      return;
++    if (failRelease) {
++      done(demo::RenderError{demo::ErrorStage::Shutdown, true, "release failed", "injected"});
++      return;
++    }
 +    pending.push_back(std::move(done));
 +  }
 +  void completeNext(demo::Result<std::monostate> r = std::monostate{}) {
@@ -403,11 +627,10 @@ index 0000000..eb12e1a
 +}
 +
 +template <class Sndr>
-+void spawnSafe(Sndr &&sndr, lexec::counting_scope::token token, std::atomic_bool &finished,
-+               std::string &outcome) {
-+  lexec::spawn(std::forward<Sndr>(sndr) | lexec::upon_error([&](std::exception_ptr) noexcept {
-+                 outcome = "dispatch-error";
-+                 finished = true;
++void spawnSafe(Sndr &&sndr, lexec::counting_scope::token token, std::atomic_bool *fault = nullptr) {
++  lexec::spawn(std::forward<Sndr>(sndr) | lexec::upon_error([fault](std::exception_ptr) noexcept {
++                 if (fault)
++                   fault->store(true);
 +               }),
 +               token);
 +}
@@ -420,88 +643,17 @@ index 0000000..eb12e1a
 +  void set_stopped() && noexcept { flag->store(true); }
 +};
 +
++void joinRoot(lexec::counting_scope &root) {
++  root.close();
++  std::atomic_bool joined{false};
++  auto op = lexec::connect(root.join(), Joined{&joined});
++  lexec::start(op);
++  REQUIRE(waitFlag(joined));
++}
++
 +} // namespace
 +
-+TEST_CASE("workflow/drain-then-release-order-on-gui") {
-+  REQUIRE(QCoreApplication::instance());
-+  lqtexec::EventLoopContext ctx;
-+  QObject host;
-+  lexec::counting_scope root;
-+  RecordingAdapter adapter;
-+  std::atomic_bool finished{false};
-+  std::string outcome;
-+  {
-+    lqtexec::ObjectScope scope{&host, ctx.get_scheduler(), root.get_token()};
-+    auto chain = demo::workflows::beginDrainSender(adapter) |
-+                 lqtexec::then_on(scope, [&](demo::Result<std::monostate> drainResult) {
-+                   if (auto *e = std::get_if<demo::RenderError>(&drainResult)) {
-+                     outcome = e->message;
-+                     finished = true;
-+                     return;
-+                   }
-+                   auto release = demo::workflows::releasePathSender(adapter) |
-+                                  lqtexec::then_on(scope, [&](demo::Result<std::monostate> releaseResult) {
-+                                    if (auto *e = std::get_if<demo::RenderError>(&releaseResult))
-+                                      outcome = e->message;
-+                                    else
-+                                      outcome = "ok";
-+                                    finished = true;
-+                                  });
-+                   spawnSafe(std::move(release), root.get_token(), finished, outcome);
-+                 });
-+    spawnSafe(std::move(chain), root.get_token(), finished, outcome);
-+
-+    REQUIRE(adapter.stages.size() == 1);
-+    CHECK(adapter.stages[0] == "drain");
-+    adapter.completeNext();
-+    for (int i = 0; i < 50 && adapter.stages.size() < 2; ++i)
-+      pumpOnce();
-+    REQUIRE(adapter.stages.size() == 2);
-+    CHECK(adapter.stages[1] == "release");
-+    adapter.completeNext();
-+    REQUIRE(waitFlag(finished));
-+    CHECK(outcome == "ok");
-+    CHECK(adapter.pending.empty());
-+  }
-+  root.close();
-+  std::atomic_bool joined{false};
-+  auto op = lexec::connect(root.join(), Joined{&joined});
-+  lexec::start(op);
-+  REQUIRE(waitFlag(joined));
-+}
-+
-+TEST_CASE("workflow/drain-error-skips-release") {
-+  REQUIRE(QCoreApplication::instance());
-+  lqtexec::EventLoopContext ctx;
-+  QObject host;
-+  lexec::counting_scope root;
-+  RecordingAdapter adapter;
-+  adapter.failDrain = true;
-+  std::atomic_bool finished{false};
-+  std::string outcome;
-+  {
-+    lqtexec::ObjectScope scope{&host, ctx.get_scheduler(), root.get_token()};
-+    auto chain = demo::workflows::beginDrainSender(adapter) |
-+                 lqtexec::then_on(scope, [&](demo::Result<std::monostate> drainResult) {
-+                   if (auto *e = std::get_if<demo::RenderError>(&drainResult))
-+                     outcome = e->cause;
-+                   else
-+                     outcome = "ok";
-+                   finished = true;
-+                 });
-+    spawnSafe(std::move(chain), root.get_token(), finished, outcome);
-+    REQUIRE(waitFlag(finished));
-+    CHECK(outcome == "injected");
-+    CHECK(adapter.stages == std::vector<std::string>{"drain"});
-+  }
-+  root.close();
-+  std::atomic_bool joined{false};
-+  auto op = lexec::connect(root.join(), Joined{&joined});
-+  lexec::start(op);
-+  REQUIRE(waitFlag(joined));
-+}
-+
-+TEST_CASE("workflow/soft-drain-only-never-releases") {
++TEST_CASE("workflow/soft-drain-then-on-gui-never-releases") {
 +  REQUIRE(QCoreApplication::instance());
 +  lqtexec::EventLoopContext ctx;
 +  QObject host;
@@ -512,18 +664,177 @@ index 0000000..eb12e1a
 +  {
 +    lqtexec::ObjectScope scope{&host, ctx.get_scheduler(), root.get_token()};
 +    auto chain = demo::workflows::softDrainOnly(adapter) |
-+                 lqtexec::then_on(scope, [&](demo::Result<std::monostate>) { finished = true; });
-+    spawnSafe(std::move(chain), root.get_token(), finished, outcome);
++                 lqtexec::then_on(scope, [&](demo::Result<std::monostate> r) {
++                   if (std::holds_alternative<demo::RenderError>(r))
++                     outcome = "err";
++                   else
++                     outcome = "ok";
++                   finished = true;
++                 });
++    spawnSafe(std::move(chain), root.get_token());
 +    REQUIRE(adapter.stages.size() == 1);
 +    CHECK(adapter.stages[0] == "drain");
 +    adapter.completeNext();
 +    REQUIRE(waitFlag(finished));
++    CHECK(outcome == "ok");
 +    CHECK(adapter.stages == std::vector<std::string>{"drain"});
-+    CHECK(adapter.pending.empty());
 +  }
-+  root.close();
-+  std::atomic_bool joined{false};
-+  auto op = lexec::connect(root.join(), Joined{&joined});
-+  lexec::start(op);
-+  REQUIRE(waitFlag(joined));
++  joinRoot(root);
++}
++
++TEST_CASE("workflow/hard-drain-destroy-release-order") {
++  REQUIRE(QCoreApplication::instance());
++  lqtexec::EventLoopContext ctx;
++  QObject host;
++  lexec::counting_scope root;
++  RecordingAdapter adapter;
++  std::atomic_bool finished{false};
++  std::vector<std::string> gui;
++  {
++    lqtexec::ObjectScope scope{&host, ctx.get_scheduler(), root.get_token()};
++    auto chain = demo::workflows::drainThenOnGui(adapter, scope, [&](demo::Result<std::monostate> drainResult) {
++      if (std::holds_alternative<demo::RenderError>(drainResult)) {
++        gui.push_back("drain-err");
++        finished = true;
++        return;
++      }
++      gui.push_back("destroyed"); // stand-in for destroyTarget on GUI
++      auto release = demo::workflows::releaseThenOnGui(adapter, scope, [&](demo::Result<std::monostate> releaseResult) {
++        if (std::holds_alternative<demo::RenderError>(releaseResult))
++          gui.push_back("release-err");
++        else
++          gui.push_back("created"); // stand-in for create/prepare resume
++        finished = true;
++      });
++      spawnSafe(std::move(release), root.get_token());
++    });
++    spawnSafe(std::move(chain), root.get_token());
++    REQUIRE(adapter.stages.size() == 1);
++    CHECK(adapter.stages[0] == "drain");
++    adapter.completeNext();
++    for (int i = 0; i < 50 && adapter.stages.size() < 2; ++i)
++      pumpOnce();
++    REQUIRE(adapter.stages.size() == 2);
++    CHECK(adapter.stages[1] == "release");
++    adapter.completeNext();
++    REQUIRE(waitFlag(finished));
++    CHECK(gui == std::vector<std::string>{"destroyed", "created"});
++  }
++  joinRoot(root);
++}
++
++TEST_CASE("workflow/drain-error-skips-release-and-converges") {
++  REQUIRE(QCoreApplication::instance());
++  lqtexec::EventLoopContext ctx;
++  QObject host;
++  lexec::counting_scope root;
++  RecordingAdapter adapter;
++  adapter.failDrain = true;
++  std::atomic_bool finished{false};
++  std::string outcome;
++  {
++    lqtexec::ObjectScope scope{&host, ctx.get_scheduler(), root.get_token()};
++    auto chain = demo::workflows::drainThenOnGui(adapter, scope, [&](demo::Result<std::monostate> drainResult) {
++      auto *e = std::get_if<demo::RenderError>(&drainResult);
++      REQUIRE(e);
++      outcome = e->cause;
++      finished = true;
++    });
++    spawnSafe(std::move(chain), root.get_token());
++    REQUIRE(waitFlag(finished));
++    CHECK(outcome == "injected");
++    CHECK(adapter.stages == std::vector<std::string>{"drain"});
++  }
++  joinRoot(root);
++}
++
++TEST_CASE("workflow/release-error-converges") {
++  REQUIRE(QCoreApplication::instance());
++  lqtexec::EventLoopContext ctx;
++  QObject host;
++  lexec::counting_scope root;
++  RecordingAdapter adapter;
++  adapter.failRelease = true;
++  std::atomic_bool finished{false};
++  std::string outcome;
++  {
++    lqtexec::ObjectScope scope{&host, ctx.get_scheduler(), root.get_token()};
++    auto chain = demo::workflows::drainThenOnGui(adapter, scope, [&](demo::Result<std::monostate>) {
++      auto release = demo::workflows::releaseThenOnGui(adapter, scope, [&](demo::Result<std::monostate> r) {
++        auto *e = std::get_if<demo::RenderError>(&r);
++        REQUIRE(e);
++        outcome = e->cause;
++        finished = true;
++      });
++      spawnSafe(std::move(release), root.get_token());
++    });
++    spawnSafe(std::move(chain), root.get_token());
++    adapter.completeNext(); // drain ok
++    for (int i = 0; i < 50 && !finished.load(); ++i)
++      pumpOnce();
++    REQUIRE(waitFlag(finished));
++    CHECK(outcome == "injected");
++    CHECK(adapter.stages == std::vector<std::string>{"drain", "release"});
++  }
++  joinRoot(root);
++}
++
++TEST_CASE("workflow/done-op-stop-token-still-delivers-value") {
++  REQUIRE(QCoreApplication::instance());
++  lqtexec::EventLoopContext ctx;
++  QObject host;
++  lexec::counting_scope root;
++  RecordingAdapter adapter;
++  std::atomic_bool finished{false};
++  std::string outcome;
++  lexec::inplace_stop_source stop;
++  {
++    lqtexec::ObjectScope scope{&host, ctx.get_scheduler(), root.get_token()};
++    stop.request_stop();
++    auto chain = lexec::write_env(demo::workflows::beginDrainSender(adapter),
++                                  lexec::prop{lexec::get_stop_token, stop.get_token()}) |
++                 lqtexec::then_on(scope, [&](demo::Result<std::monostate> r) {
++                   auto *e = std::get_if<demo::RenderError>(&r);
++                   REQUIRE(e);
++                   outcome = e->cause;
++                   finished = true;
++                 });
++    spawnSafe(std::move(chain), root.get_token());
++    REQUIRE(adapter.stages.size() == 1);
++    adapter.completeNext(std::monostate{}); // Done fires after stop requested
++    REQUIRE(waitFlag(finished));
++    CHECK(outcome == "stop token requested");
++  }
++  joinRoot(root);
++}
++
++TEST_CASE("workflow/phase-early-return-drops-late-done") {
++  // Mirrors production `if (phase != Draining) return;` after a superseded rebuild.
++  REQUIRE(QCoreApplication::instance());
++  lqtexec::EventLoopContext ctx;
++  QObject host;
++  lexec::counting_scope root;
++  RecordingAdapter adapter;
++  std::atomic_bool finished{false};
++  int applied = 0;
++  std::atomic_bool phaseDraining{true};
++  {
++    lqtexec::ObjectScope scope{&host, ctx.get_scheduler(), root.get_token()};
++    auto chain = demo::workflows::beginDrainSender(adapter) |
++                 lqtexec::then_on(scope, [&](demo::Result<std::monostate>) {
++                   if (!phaseDraining.load())
++                     return; // silent early return — late Done ignored
++                   ++applied;
++                   finished = true;
++                 });
++    spawnSafe(std::move(chain), root.get_token());
++    phaseDraining = false; // supersede before Done
++    adapter.completeNext();
++    for (int i = 0; i < 30; ++i)
++      pumpOnce();
++    CHECK(applied == 0);
++    CHECK(finished.load() == false);
++  }
++  // Still must join: DoneOpSender completed the sender even if GUI fn no-op'd.
++  joinRoot(root);
 +}

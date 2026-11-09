@@ -11,8 +11,10 @@
 
 namespace demo::workflows {
 
-// Done callbacks become set_value(Result). Unexpected throws become RenderError values.
-// No set_error channel so lexec::spawn can attach without upon_error plumbing.
+// Done callbacks become set_value(Result). No set_error channel (spawn-friendly).
+// M2: when the stop token is already requested at Done time, still deliver a value
+// (cancelled RenderError) so drain/release pipelines can leave Draining and converge.
+// Adapters must always invoke Done exactly once on every beginDrain/releasePath path.
 struct DoneOpSender {
   using sender_concept = lexec::sender_t;
   using completion_signatures =
@@ -36,7 +38,12 @@ struct DoneOpSender {
           try {
             auto token = lexec::get_stop_token(lexec::get_env(rcvr));
             if (token.stop_requested()) {
-              lexec::set_stopped(static_cast<Rcvr &&>(rcvr));
+              // Prefer value completion with a cancelled error so then_on / let_value
+              // handlers run and can fail-closed / continue shutdown. Dropping the
+              // Result via set_stopped alone left phase==Draining and root.join hung.
+              lexec::set_value(static_cast<Rcvr &&>(rcvr),
+                               Result<std::monostate>{RenderError{
+                                   ErrorStage::Shutdown, true, "operation stopped", "stop token requested"}});
               return;
             }
             lexec::set_value(static_cast<Rcvr &&>(rcvr), std::move(result));
@@ -73,6 +80,13 @@ inline DoneOpSender beginDrainSender(PresentationAdapter &adapter) {
 
 inline DoneOpSender releasePathSender(PresentationAdapter &adapter) {
   return DoneOpSender{[&adapter](Done done) { adapter.releasePath(std::move(done)); }};
+}
+
+inline DoneOpSender preparePathSender(PresentationAdapter &adapter, PresentationPath path,
+                                      std::shared_ptr<NativeHostLease> lease) {
+  return DoneOpSender{[&adapter, path, lease = std::move(lease)](Done done) mutable {
+    adapter.preparePath(path, std::move(lease), std::move(done));
+  }};
 }
 
 } // namespace demo::workflows

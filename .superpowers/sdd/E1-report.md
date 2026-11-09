@@ -1,94 +1,78 @@
-# E1 — lexec sender 工作流重写
+# E1 — lexec sender 工作流（复核补齐）
 
 - **Branch:** `feat/qt-vulkan-demo`
 - **BASE:** `80528df881d0c1f5c22d8c26f7e11221d986bbaa`
-- **HEAD:** feat/qt-vulkan-demo tip after E1 (run: git rev-parse HEAD)
-- **Asia/Shanghai:** 2026-11-09T16:25:00+08:00
-- **Page:** 附录 A 已更新为「v1.1 已批准」（entt + 同窗双视口；不覆盖 v1.0）
+- **HEAD:** feat/qt-vulkan-demo tip — run `git rev-parse HEAD`
+- **Asia/Shanghai:** 2026-11-09T16:45:00+08:00
 
-## 改动摘要
+## 范围完成情况
 
-1. **`src/render/workflows/AdapterSenders.h`**（新）
-   - `DoneOpSender`：把 `PresentationAdapter::Done` 包装为仅 `set_value(Result)` / `set_stopped` 的 sender（无 `set_error`，便于 `spawn`）。
-   - `beginDrainSender` / `releasePathSender`。
+| 项 | 状态 |
+|----|------|
+| Soft：`drain \| then_on(GUI, destroy+bind)`，不 release | 完成 |
+| Hard：`drain \| then_on(destroy) \| release \| then_on(create/finish-stop)` | 完成 |
+| upon_error → GUI hop（M1） | 完成 `guiDrainFault` |
+| DoneOpSender stop 时仍 set_value(cancelled)（M2） | 完成 |
+| workflow 覆盖 hard/soft/错误/取消/early-return（M3） | 完成 6 用例 |
+| 黑帧锁屏/息屏 → exit 77 + CTest SKIP（M4） | 完成 |
+| AssetLoader：`associate` + 既有 `write_env` 取消 | 完成 |
+| SessionFrameSubmit：`associate` | 完成 |
+| 加载/管线切换值命令 | 保持 latest-wins（A1.6）；取消走 LoadTicket/`write_env` stop |
+| `lexec::stop_when` 公共 API | **上游未导出**（见局限） |
 
-2. **`src/render/workflows/SessionWorkflows.h`**（新）
-   - `softDrainOnly` → `beginDrainSender`（soft 保 presenter/host）。
+## 屏幕状态（只读，验收前）
 
-3. **`src/render/RenderSession.cpp`**
-   - **Soft（VulkanShared）：** `softDrainOnly | then(control-hop) | upon_error` + `spawn`。GUI 投递仍走既有 `control()`（QTimer post），避免与 `adapter.work()` 的 `then_on` 嵌套重入；语义对齐 pre-E1 soft/hard 规则。
-   - **Hard `beginDrain`：** `beginDrainSender | then(control→destroyTarget→releasePathSender|then(control))` + `upon_error` + `spawn`。`control()` 在 `~RenderSession` 重置 `uiScope` 之后仍可用（asset_async 析构路径依赖此点）。
+```
+loginctl session 2: LockedHint=yes IdleHint=yes Active=yes
+xset: DPMS Enabled, Monitor is Off
+```
 
-4. **`tests/workflow_test.cpp`** + **CMakeLists.txt**
-   - 3 个用例：`drain-then-release-order-on-gui`、`drain-error-skips-release`、`soft-drain-only-never-releases`。
-   - 组合真实 `lexec`/`lqtexec` 算法：`spawn`、`then`、`then_on`、`upon_error`、`counting_scope`。
+黑帧自测：`exit 77`，明确 SKIP 文案。
+**等待解锁后重跑验收：黑帧 ×3、DPR1.25、负例。**（本轮未尝试解锁）
 
-## 保持的保证
-
-| 保证 | 做法 |
-|------|------|
-| 不阻塞 GUI | drain/release 经 adapter worker；完成用 `control()`/`then_on` 回 GUI；无 `sync_wait` |
-| 不闪黑 | soft 只 drain，不 `releasePath`；hard 才 destroy→release |
-| 按序 drain | hard：drain → destroy target → release → Idle/destroyResources |
-| fail-closed | `upon_error` / `RenderError` → `DrainFailed` + `report` |
-| RenderSession 独占 | 未向 UI 暴露 World/target；值命令/快照不变 |
-| 真实算法 | 仅用头文件中的 `lexec::then/upon_error/spawn`、`lqtexec::then_on`、`counting_scope` |
+锁屏下仍作为功能证据跑通：`e2e_shared_cycle`、`e2e_shared_dpr125`、unit、负例等。
 
 ## 证据
 
-### 二进制 mtime（Asia/Shanghai，箱内本地）
+### 二进制 mtime（Asia/Shanghai）
 
 ```
-build/plan-debug/lrender_demo  2026-11-09 16:21:19.059415767 +0800
-build/plan-debug/demo_e2e      2026-11-09 16:21:19.053673715 +0800
-build/plan-debug/demo_tests    2026-11-09 16:21:19.182308953 +0800
+lrender_demo  2026-11-09 16:44:04 +0800
+demo_e2e      2026-11-09 16:44:04 +0800
+demo_tests    2026-11-09 16:44:01 +0800
 ```
 
 ### 单测
 
 - `QT_QPA_PLATFORM=offscreen demo_tests --no-skip=true`
-- **168/168** passed，6572 assertions（含新增 3× `workflow/*`）
-- 日志：`/tmp/e1-unit-final.log`
+- **171/171** passed，**6591** assertions（含 workflow/* ×6）
+- 日志：`/tmp/e1i1-unit2.log`
 
-### CTest（除黑帧）
+### CTest
 
-- `ctest -E e2e_shared_black_flash` → **26/26** passed
-- 含 DPR：`e2e_shared_dpr125` Passed 4.79s
-- 含负例标签：`e2e_zero_shared`、`e2e_strict_offscreen`、`e2e_fault_*` 等
-- 日志：`/tmp/e1-ctest-nobf.log`
+- **27 tests：100% passed，1 skipped**（`e2e_shared_black_flash` SKIP 77）
+- 含 DPR `e2e_shared_dpr125` Passed；负例标签通过
+- 日志：`/tmp/e1i1-ctest.log`
 
-### 显式负例（期望非零）
+## 上游 API 证据：`stop_when`
 
-| 用例 | exit |
-|------|------|
-| `--inject-zero-shared` | 1 |
-| `QT_QPA_PLATFORM=offscreen` + shared resize | 1 |
-| `--asset-root` 缺失目录 | 1 |
+- 文件：`third_party/lexec/include/lexec/algorithms/stop_when.hpp`
+- `stop_when` 定义在 **`namespace lexec::detail`**（约 L17–L146），**未** `using`/`inline constexpr` 到 `lexec::`
+- 公共取消路径：`write_env` + `prop{get_stop_token, …}`（AssetLoader 已用）；`spawn` 内部使用 `detail::stop_when`
+- **未**调用 `lexec::detail::stop_when`（避免依赖 detail）
 
-### 黑帧 e2e ×3
+## 保持的保证
 
-| run | exit | soft extent | final |
-|-----|------|-------------|-------|
-| 1 | 1 | 160x120 | completed=2 sharedShown=2 |
-| 2 | 1 | 160x120 | completed=2 sharedShown=2 |
-| 3 | 1 | 160x120 | completed=2 sharedShown=2 |
-
-日志：`/tmp/e1-black-flash-x3.log`
+不阻塞 GUI；soft 不 release（不闪黑）；hard 序 drain→destroy→release；drain/release 错误 fail-closed 保留 target；GUI 独占状态；值命令/不可变快照。
 
 ## 已知局限
 
-1. **`e2e_shared_black_flash` 当前环境失败（非 E1 逻辑回归）**
-   - Soft 完成正常（`soft target extent=160x120`）。
-   - Visibility 非 continuous：soft 后脏帧耗尽即 idle（`completed/sharedShown=2` 符合）。
-   - Stage0 卡在 `nearBlack(grabWindow)`：Vulkan shared 窗口抓屏持续近黑，45s 内部 deadline 退出。
-   - **对照：** 将 `RenderSession.cpp` 整文件回退到 `80528df` 后同命令同样失败；` --self-test full` 在同环境通过（exit 0）。
-   - 故判为 **grabWindow/近黑门禁的环境问题**，不是 sender 改写引入的 soft/hard 破坏。晨间 `fix-black-flash-timeout` 绿跑记录仍有效作历史基线。
-
-2. **E1 未改加载/管线切换/退出的其它回调路径**（仍为既有 `control`/loader sender）；后续 E 任务再扩。
-
-3. **未开始 E2**（entt）。
+1. 黑帧验收待解锁后重跑 ×3（本轮 SKIP）。
+2. `lexec::stop_when` 无公共导出；取消用 `write_env` stop token。
+3. RenderSession 仍偏大；soft/hard 已收敛到 workflows + `then_on`，prepare/install 小步仍在 tick 内（符合 GUI 有界安装）。
+4. `.superpowers/` 在 `.gitignore`；本报告因此前已跟踪而可普通 `git add`（M5：不再 `-f` 强制新报告）。
 
 ## 未做
 
-- 未 push / merge / amend / `--no-verify` / worktree
-- 未改 `.vscode` / 第三方源码
+未 push/amend/改第三方/动桌面解锁；未开始 E2。
+

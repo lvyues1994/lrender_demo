@@ -28,23 +28,24 @@ void submitSessionFrame(lr::render::Renderer &renderer, lr::render::FrameDesc fr
       lqtexec::then_on(std::move(settled), scope, [done](FrameCompletion c) { done(std::move(c)); });
   // spawn explicitly rejects an unhandled error channel. Preserve the same receipt
   // on hop/materialization error; done normalizes delivery back onto the GUI.
-  lexec::spawn(std::move(hopped) |
-                   lexec::upon_error([done = std::move(done), stamp](std::exception_ptr failure) noexcept {
+  auto guarded = std::move(hopped) |
+                 lexec::upon_error([done = std::move(done), stamp](std::exception_ptr failure) noexcept {
+                   try {
+                     std::string cause = "completion dispatch failed";
                      try {
-                       std::string cause = "completion dispatch failed";
-                       try {
-                         if (failure)
-                           std::rethrow_exception(failure);
-                       } catch (std::exception const &e) {
-                         cause = e.what();
-                       } catch (...) {
-                       }
-                       done({stamp, RenderError{ErrorStage::Submit, false, "completion dispatch failed",
-                                                std::move(cause)}});
+                       if (failure)
+                         std::rethrow_exception(failure);
+                     } catch (std::exception const &e) {
+                       cause = e.what();
                      } catch (...) {
-                       qFatal("cannot report frame completion failure");
                      }
-                   }),
-               root.get_token());
+                     done({stamp, RenderError{ErrorStage::Submit, false, "completion dispatch failed",
+                                              std::move(cause)}});
+                   } catch (...) {
+                     qFatal("cannot report frame completion failure");
+                   }
+                 });
+  // associate keeps the frame completion tied to the session counting_scope.
+  lexec::spawn(lexec::associate(std::move(guarded), root.get_token()), root.get_token());
 }
 } // namespace demo
