@@ -119,7 +119,9 @@ struct Viewer : QObject {
     if (!flash.armed || !window)
       return;
     ++flash.samples;
-    if (session && session->snapshot()->path == PresentationPath::VulkanShared) {
+    auto const shared =
+        session && session->snapshot()->path == PresentationPath::VulkanShared;
+    if (shared) {
       auto shown = session->snapshot()->performance.sharedShown;
       if (shown < flash.sharedShownAtStart)
         ++flash.sharedShownGap;
@@ -130,21 +132,25 @@ struct Viewer : QObject {
     auto host = native ? native->winId() : 0;
     if (flash.host && host && host != flash.host)
       ++flash.hostChanges;
-    if (!host) {
+    if (shared && !host) {
       // Shared path with no live native host is exactly the black-hole window gap.
       ++flash.blackSamples;
       flash.blackMs = flash.timer.elapsed();
       return;
     }
-    if (flash.host == 0)
+    if (flash.host == 0 && host)
       flash.host = host;
-    auto img = native->screen() ? native->screen()->grabWindow(host).toImage() : QImage{};
+    // Readback has no native host; sample the owned widget image instead of grabWindow.
+    auto img = shared ? (native && native->screen() ? native->screen()->grabWindow(host).toImage()
+                                                    : QImage{})
+                      : sampleViewport();
     if (nearBlack(img)) {
       ++flash.blackSamples;
       flash.blackMs = flash.timer.elapsed();
     } else {
       flash.seenContent = true;
-      flash.host = host;
+      if (host)
+        flash.host = host;
     }
   }
   void beginFlash(char const *name, int expectW = 0, int expectH = 0) {
@@ -761,15 +767,27 @@ struct Viewer : QObject {
         if (nearBlack(sampleViewport()))
           return;
         endFlash();
-        // Leave Pathtrace before resize so continuous PT does not dominate the wait.
-        session->setRenderOptions({PipelineKind::Visibility, 1, false});
-        beginFlash("resize", 220, 160);
-        window->viewport().setFixedSize(220, 160);
+        beginFlash("pipeline-interactive");
+        session->setRenderOptions({PipelineKind::PathtraceInteractive, 1, false});
         lastCompleted = completed;
         stage = 3;
         return;
       }
       if (stage == 3) {
+        if (completed <= lastCompleted)
+          return;
+        if (nearBlack(sampleViewport()))
+          return;
+        endFlash();
+        // Leave path tracing before resize so continuous PT does not dominate the wait.
+        session->setRenderOptions({PipelineKind::Visibility, 1, false});
+        beginFlash("resize", 220, 160);
+        window->viewport().setFixedSize(220, 160);
+        lastCompleted = completed;
+        stage = 4;
+        return;
+      }
+      if (stage == 4) {
         if (completed <= lastCompleted)
           return;
         if (nearBlack(sampleViewport()))

@@ -50,7 +50,7 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
   model_->addItems({"african_head", "diablo", "boggie", "floor"});
   pipeline_ = new QComboBox;
   pipeline_->setObjectName("pipeline");
-  pipeline_->addItems({"Visibility", "Pathtrace"});
+  pipeline_->addItems({"Visibility", "Pathtrace", "PathtraceInteractive"});
   exposure_ = new QDoubleSpinBox;
   exposure_->setObjectName("exposure");
   exposure_->setRange(.01, 100);
@@ -132,11 +132,14 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
           [this] { viewport_->resetCamera(bounds_); });
 }
 void MainWindow::optionsChanged() {
-  if (commands_.options)
-    commands_.options({pipeline_->currentIndex() == 1
-                           ? PipelineKind::Pathtrace
-                           : PipelineKind::Visibility,
-                       float(exposure_->value()), taa_->isChecked()});
+  if (!commands_.options)
+    return;
+  auto pipeline = PipelineKind::Visibility;
+  if (pipeline_->currentIndex() == 1)
+    pipeline = PipelineKind::Pathtrace;
+  else if (pipeline_->currentIndex() == 2)
+    pipeline = PipelineKind::PathtraceInteractive;
+  commands_.options({pipeline, float(exposure_->value()), taa_->isChecked()});
 }
 void MainWindow::restoreAppearance() {
   if (!lastSnapshot_)
@@ -160,7 +163,9 @@ void MainWindow::showSnapshot(SessionSnapshotPtr s) {
   QSignalBlocker a(model_), b(pipeline_), c(exposure_), d(taa_);
   if (s->model)
     model_->setCurrentText(QString::fromStdString(s->model->value));
-  pipeline_->setCurrentIndex(s->options.pipeline == PipelineKind::Pathtrace);
+  pipeline_->setCurrentIndex(s->options.pipeline == PipelineKind::PathtraceInteractive ? 2
+                                 : s->options.pipeline == PipelineKind::Pathtrace       ? 1
+                                                                                       : 0);
   exposure_->setValue(s->options.exposure);
   taa_->setChecked(s->options.taa);
   viewport_->showCamera(s->camera);

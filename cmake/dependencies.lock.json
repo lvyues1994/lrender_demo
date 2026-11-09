@@ -48,7 +48,7 @@
       "path": "third_party/lrender",
       "url": "https://github.com/lvyues1994/lrender.git",
       "branch": "main",
-      "sha": "dcf36670724c65b016db9234309ad49192dda6c8",
+      "sha": "d00dcf52c0cac4242464ad0ecd646466aa38ef97",
       "upstreamPin": "direct demo dependency; latest default-branch HEAD at download, frozen by sha"
     },
     {

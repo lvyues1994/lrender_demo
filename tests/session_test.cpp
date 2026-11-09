@@ -1173,6 +1173,89 @@ TEST_CASE("session/soft-rebuild-hide-zero-keeps-path-without-release") {
   stop(s, h);
   CHECK(std::count(stages.begin(), stages.end(), "release") == 1);
 }
+
+TEST_CASE("session/pathtrace-interactive-selects-interactive-pipeline-and-stays-continuous") {
+  Harness h;
+  auto r = resources();
+  auto const interactive = r.renderer->pipelines().pathTraceInteractive();
+  auto const reference = r.renderer->pipelines().pathTraceReference();
+  auto const visibility = r.renderer->pipelines().visibility();
+  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+                  std::make_unique<ReadbackAdapter>(h.imageEvents()), h.submit(), h.events());
+  start(s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() == 1; }));
+  CHECK(h.jobs[0].frame.views[0].pipeline == visibility);
+  h.complete(0);
+  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
+
+  RenderOptions options;
+  options.pipeline = PipelineKind::PathtraceInteractive;
+  s.setRenderOptions(options);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 2; }));
+  CHECK(h.jobs[1].frame.views[0].pipeline == interactive);
+  CHECK(h.jobs[1].frame.views[0].pipeline != reference);
+  h.complete(1);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 3; }));
+  CHECK(h.jobs.back().frame.views[0].pipeline == interactive);
+  for (std::size_t i = 2; i < h.jobs.size(); ++i) h.complete(i);
+  stop(s, h);
+}
+
+TEST_CASE("session/cpu_smoke-pathtrace-interactive-accumulates-nonblack") {
+  Harness h;
+  auto s = session(h, true);
+  h.readSnapshot = [&] { return s->snapshot(); };
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.images >= 1; }));
+  RenderOptions options;
+  options.pipeline = PipelineKind::PathtraceInteractive;
+  s->setRenderOptions(options);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.accumulatedSamples >= 2 && h.images >= 2; }));
+  CHECK(s->snapshot()->backend == "cpu");
+  REQUIRE(h.lastImage);
+  REQUIRE(h.lastImage->image);
+  CHECK(h.lastImage->image->extent.x == 8);
+  CHECK(h.lastImage->image->extent.y == 8);
+  auto bright = 0u;
+  for (auto pixel : h.lastImage->image->pixels) {
+    auto r = pixel & 0xffu, g = (pixel >> 8) & 0xffu, b = (pixel >> 16) & 0xffu;
+    if ((r + g + b) / 3u > 8u) ++bright;
+  }
+  CHECK(bright > 0);
+  stop(*s, h);
+}
+
+TEST_CASE("session/soft-rebuild-pathtrace-interactive-keeps-path-without-release") {
+  Harness h;
+  std::vector<std::string> stages;
+  auto adapter = std::make_unique<ReadbackAdapter>(h.imageEvents(), [&](auto stage, Done done) {
+    stages.push_back(stage);
+    done(std::monostate{});
+  });
+  auto r = resources();
+  auto const interactive = r.renderer->pipelines().pathTraceInteractive();
+  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world), std::move(adapter),
+                  h.submit(), h.events());
+  start(s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() == 1; }));
+  h.complete(0);
+  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
+  auto generation = s.snapshot()->generation;
+  auto firstTarget = h.jobs[0].frame.views[0].target;
+  RenderOptions options;
+  options.pipeline = PipelineKind::PathtraceInteractive;
+  s.setRenderOptions(options);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 2; }));
+  CHECK(s.snapshot()->generation > generation);
+  CHECK(h.jobs[1].frame.views[0].target != firstTarget);
+  CHECK(h.jobs[1].frame.views[0].pipeline == interactive);
+  CHECK(std::count(stages.begin(), stages.end(), "release") == 0);
+  CHECK(std::count(stages.begin(), stages.end(), "prepare") == 1);
+  for (std::size_t i = 1; i < h.jobs.size(); ++i) h.complete(i);
+  stop(s, h);
+  CHECK(std::count(stages.begin(), stages.end(), "release") == 1);
+}
+
 TEST_CASE("session/soft-rebuild-resize-uses-host-physical-not-cached-wsi") {
   Harness h;
   struct Spy : ReadbackAdapter {

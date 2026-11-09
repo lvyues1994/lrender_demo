@@ -614,9 +614,12 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       view.id = stamp->view;
       view.target = *target;
       view.camera = current->camera.camera;
-      view.pipeline = current->options.pipeline == PipelineKind::Pathtrace
-                          ? resources.renderer->pipelines().pathTraceReference()
-                          : resources.renderer->pipelines().visibility();
+      if (current->options.pipeline == PipelineKind::PathtraceInteractive)
+        view.pipeline = resources.renderer->pipelines().pathTraceInteractive();
+      else if (current->options.pipeline == PipelineKind::Pathtrace)
+        view.pipeline = resources.renderer->pipelines().pathTraceReference();
+      else
+        view.pipeline = resources.renderer->pipelines().visibility();
       view.settings.exposure = current->options.exposure;
       view.settings.antiAliasing =
           current->options.taa ? lr::render::AntiAliasing::Taa : lr::render::AntiAliasing::None;
@@ -696,7 +699,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       }
       if (!blocked() && record.textureSettling && record.stamp.generation == state.snapshot()->generation) {
         auto o = state.snapshot()->options;
-        if (o.pipeline == PipelineKind::Pathtrace || o.taa)
+        if (isPathTracePipeline(o.pipeline) || o.taa)
           sceneParametersChanged();
       }
       if (resources.world && !blocked() && !result.lostTextures.empty()) {
@@ -730,7 +733,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   }
   void sceneParametersChanged() {
     auto o = state.snapshot()->options;
-    if (target && (o.pipeline == PipelineKind::Pathtrace || o.taa)) {
+    if (target && (isPathTracePipeline(o.pipeline) || o.taa)) {
       state.presentationInvalidated(
           {ErrorStage::Surface, true, "scene parameter history reset", "fresh temporal target"});
       rebuild = true;
@@ -964,7 +967,7 @@ void RenderSession::setRenderOptions(RenderOptions options) {
   auto const previous = s.state.snapshot()->options;
   s.state.setRenderOptions(options);
   s.historyChange(previous.pipeline != options.pipeline || previous.taa != options.taa);
-  s.pump.setContinuous(options.pipeline == PipelineKind::Pathtrace || options.taa);
+  s.pump.setContinuous(isPathTracePipeline(options.pipeline) || options.taa);
   s.pump.markDirty();
   s.queueTick();
   s.publish();

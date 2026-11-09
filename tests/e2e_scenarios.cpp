@@ -42,9 +42,12 @@ bool E2eScenario::tick(RenderSession &s, MainWindow &w) {
     if (changes < 100 && (name == "cycle" || name == "resize")) {
       if (name == "cycle") {
         s.selectModel({ids[changes % 4]});
-        s.setRenderOptions(
-            {changes % 2 ? PipelineKind::Pathtrace : PipelineKind::Visibility,
-             1, false});
+        auto pipeline = PipelineKind::Visibility;
+        if (changes % 3 == 1)
+          pipeline = PipelineKind::Pathtrace;
+        else if (changes % 3 == 2)
+          pipeline = PipelineKind::PathtraceInteractive;
+        s.setRenderOptions({pipeline, 1, false});
       } else {
         int x = changes % 4 ? 64 + int(changes % 13) : 0,
             y = x ? 48 + int(changes % 7) : 0;

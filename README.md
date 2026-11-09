@@ -55,7 +55,7 @@ cp "$APP" /tmp/lrender-demo-bin/lrender_demo
 Move/copy of the executable plus explicit resource root is supported on the tested
 host; this is NOT a self-contained SDK/driver bundle or cross-machine packaging.
 Drag to orbit, wheel to zoom, Reset view frames the installed bounds. Model,
-pipeline, exposure, TAA, ambient, roughness and normal map controls emit values;
+pipeline (Visibility / Pathtrace / PathtraceInteractive), exposure, TAA, ambient, roughness and normal map controls emit values;
 appearance commands synchronously acknowledge the actual GUI-applied value, even
 when snapshot publication is delayed. Ambient/roughness typing commits on Return
 or focus-out (arrows/wheel commit steps); periodic statistics refreshes preserve
@@ -165,7 +165,7 @@ locks is a deliberate future review action, not an automatic configure step.
 | third_party/doctest | `d44d4f6e66232d716af82f00a063759e9d0e50d6` | v2.5.3 |
 | third_party/lexec | `a2568cc5bf14f69addc7d0e04b1e5ed5c0b2173b` | lrender: a2568cc5bf14f69addc7d0e04b1e5ed5c0b2173b; lqtexec fallback: e032d551d53d87209b83d07fd172890461db643b (not used; shared existing lexec::lexec target) |
 | third_party/lqtexec | `f9c8d69d180f5c53bada3c3f408b9c356879a2e5` | direct demo dependency; latest default-branch HEAD at download, frozen by sha |
-| third_party/lrender | `dcf36670724c65b016db9234309ad49192dda6c8` | direct demo dependency; latest default-branch HEAD at download, frozen by sha |
+| third_party/lrender | `d00dcf52c0cac4242464ad0ecd646466aa38ef97` | direct demo dependency; latest default-branch HEAD at download, frozen by sha |
 | third_party/stackfull | `acb88611e1de8fbe7ed6e195ba76ad9cbb04a9dc` | acb88611e1de8fbe7ed6e195ba76ad9cbb04a9dc |
 | third_party/stb | `4e9b368bfc071e97206ea5c6adba68dd0cbf8897` | 003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5 |
 | third_party/tc_astcenc | `2bed807e63d5bd756d26cd00604e5ae3b86e3348` | 5.7.0 |

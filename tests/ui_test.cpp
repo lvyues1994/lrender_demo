@@ -71,8 +71,11 @@ TEST_CASE("ui/options-and-model-commands-snapshot-does-not-loop") {
   REQUIRE(pipeline);
   REQUIRE(exposure);
   REQUIRE(model);
+  CHECK(pipeline->count() == 3);
   pipeline->setCurrentIndex(1);
   CHECK(last.pipeline == PipelineKind::Pathtrace);
+  pipeline->setCurrentIndex(2);
+  CHECK(last.pipeline == PipelineKind::PathtraceInteractive);
   exposure->setValue(2);
   CHECK(last.exposure == 2);
   model->setCurrentIndex(1);
@@ -81,8 +84,10 @@ TEST_CASE("ui/options-and-model-commands-snapshot-does-not-loop") {
   auto count = options;
   auto snap = std::make_shared<SessionSnapshot>();
   snap->options.exposure = 3;
+  snap->options.pipeline = PipelineKind::PathtraceInteractive;
   snap->model = ModelId{"floor"};
   window.showSnapshot(snap);
+  CHECK(pipeline->currentIndex() == 2);
   CHECK(options == count);
   CHECK(models == 1);
 }

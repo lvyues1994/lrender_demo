@@ -13,7 +13,10 @@ namespace demo {
 struct ModelId { std::string value; };
 using AssetRequestId = std::uint64_t;
 using SessionGeneration = std::uint64_t;
-enum class PipelineKind { Visibility, Pathtrace };
+enum class PipelineKind { Visibility, Pathtrace, PathtraceInteractive };
+inline constexpr bool isPathTracePipeline(PipelineKind kind) noexcept {
+    return kind == PipelineKind::Pathtrace || kind == PipelineKind::PathtraceInteractive;
+}
 enum class PresentationPath { VulkanShared, Readback };
 enum class LifeState { Idle, Preparing, Running, Paused, Recovering, Stopping, Stopped, Failed };
 enum class ErrorStage { Load, Surface, Probe, Submit, Present, Shutdown };
