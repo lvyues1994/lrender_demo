@@ -3,6 +3,7 @@
 #include "Diagnostics.h"
 #include "FramePump.h"
 #include "SessionFrameSubmit.h"
+#include "workflows/SessionWorkflows.h"
 #include "SessionState.h"
 #include "assets/AssetLoader.h"
 #include <QCoreApplication>
@@ -357,14 +358,25 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     };
     if (selectedPath == PresentationPath::VulkanShared) {
       phase = Draining;
-      adapter->beginDrain(control([finish](Impl &s, auto result) {
+      auto self = shared_from_this();
+      // Sender launches drain; control() posts GUI hop (same delivery as pre-E1).
+      auto cont = control([finish](Impl &s, auto result) {
         if (auto e = std::get_if<RenderError>(&result)) {
           s.phase = DrainFailed;
           s.report(*e);
           return;
         }
         finish();
-      }));
+      });
+      auto chain = workflows::softDrainOnly(*adapter) |
+                   lexec::then([cont = std::move(cont)](Result<std::monostate> result) mutable {
+                     cont(std::move(result));
+                   });
+      lexec::spawn(std::move(chain) | lexec::upon_error([self](std::exception_ptr) noexcept {
+                     self->phase = DrainFailed;
+                     self->report(issue(ErrorStage::Shutdown, "soft drain dispatch failed", "exception"));
+                   }),
+                   root.get_token());
       return;
     }
     finish();
@@ -387,22 +399,28 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     receiptWaitMs = 0;
     receiptWaitStarted.reset();
     phase = Draining;
-    adapter->beginDrain(control([](Impl &s, auto result) {
-      if (auto e = std::get_if<RenderError>(&result)) {
+    auto self = shared_from_this();
+    // Sender launches beginDrain; control() GUI hop survives ~RenderSession uiScope reset.
+    auto afterDrain = control([](Impl &s, auto drainResult) {
+      if (s.phase != Draining)
+        return;
+      if (auto e = std::get_if<RenderError>(&drainResult)) {
         s.phase = DrainFailed;
         s.report(*e);
         return;
       }
       try {
+        s.phase = Releasing;
         s.destroyTarget();
-      } catch (std::exception const &e) {
+      } catch (std::exception const &ex) {
         s.phase = DrainFailed;
-        s.report(issue(ErrorStage::Shutdown, "target destruction failed", e.what()));
+        s.report(issue(ErrorStage::Shutdown, "target destruction failed", ex.what()));
         return;
       }
-      s.phase = Releasing;
-      s.adapter->releasePath(s.control([](Impl &s, auto result) {
-        if (auto e = std::get_if<RenderError>(&result)) {
+      auto afterRelease = s.control([](Impl &s, auto releaseResult) {
+        if (s.phase != Releasing)
+          return;
+        if (auto e = std::get_if<RenderError>(&releaseResult)) {
           s.phase = DrainFailed;
           s.report(*e);
           return;
@@ -418,8 +436,27 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
             s.destroyResources(false);
         } else
           s.queueTick();
-      }));
-    }));
+      });
+      auto release = workflows::releasePathSender(*s.adapter) |
+                     lexec::then([afterRelease = std::move(afterRelease)](Result<std::monostate> r) mutable {
+                       afterRelease(std::move(r));
+                     });
+      auto keep = s.shared_from_this();
+      lexec::spawn(std::move(release) | lexec::upon_error([keep](std::exception_ptr) noexcept {
+                     keep->phase = DrainFailed;
+                     keep->report(issue(ErrorStage::Shutdown, "release dispatch failed", "exception"));
+                   }),
+                   keep->root.get_token());
+    });
+    auto chain = workflows::beginDrainSender(*adapter) |
+                 lexec::then([afterDrain = std::move(afterDrain)](Result<std::monostate> r) mutable {
+                   afterDrain(std::move(r));
+                 });
+    lexec::spawn(std::move(chain) | lexec::upon_error([self](std::exception_ptr) noexcept {
+                   self->phase = DrainFailed;
+                   self->report(issue(ErrorStage::Shutdown, "hard drain dispatch failed", "exception"));
+                 }),
+                 root.get_token());
   }
   void destroyResources(bool ambiguousBarrier) {
     phase = Destroying;

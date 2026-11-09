@@ -91,6 +91,7 @@ add_executable(lrender_demo src/app/main.cpp)
 target_link_libraries(lrender_demo PRIVATE demo_ui)
 
 target_sources(demo_tests PRIVATE tests/shutdown_test.cpp)
+target_sources(demo_tests PRIVATE tests/workflow_test.cpp)
 
 target_sources(demo_core PRIVATE src/app/ApplicationLifetime.cpp)
 
