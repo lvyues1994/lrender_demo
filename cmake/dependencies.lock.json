@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "notes": "Locked local source HEADs; upstreamPin records unmodified upstream declarations, not proof of compatibility. Qt/Vulkan SDK/Clang are system dependencies. P10 cross-checked all 15 full SHAs against approved design section 7; pins and source declarations unchanged. Model permission is separately described in licenses/ASSET_NOTICES.txt.",
+  "notes": "Locked local source HEADs; upstreamPin records unmodified upstream declarations, not proof of compatibility. Qt/Vulkan SDK/Clang are system dependencies. Lock contains 15 full SHAs (including third_party/entt). Model permission is separately described in licenses/ASSET_NOTICES.txt.",
   "records": [
     {
       "path": "assets/sources/tinyrenderer",
@@ -40,9 +40,9 @@
     {
       "path": "third_party/entt",
       "url": "https://github.com/skypjack/entt.git",
-      "branch": "master",
+      "branch": "main",
       "sha": "1dcd7aab6548786f7672ff578639188bd2f0d837",
-      "upstreamPin": "v4.1.0 tip 1dcd7aa (latest default-branch HEAD at E2 clone)"
+      "upstreamPin": "v4.1.0 tip 1dcd7aa on default branch main (E2 clone)"
     },
     {
       "path": "third_party/lexec",

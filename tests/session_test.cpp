@@ -1288,3 +1288,47 @@ TEST_CASE("session/soft-rebuild-resize-uses-host-physical-not-cached-wsi") {
   for (std::size_t i = 1; i < h.jobs.size(); ++i) h.complete(i);
   stop(s, h);
 }
+
+TEST_CASE("session/editor-value-commands-transform-in-snapshot") {
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  auto id = s->createEditorEntity("edit", {});
+  REQUIRE(id.isValid());
+  {
+    auto snap = s->snapshot();
+    bool found = false;
+    for (auto const &e : snap->entities)
+      if (e.id == id && e.name == "edit")
+        found = true;
+    REQUIRE(found);
+  }
+  lr::core::Transform xf{};
+  xf.translation = {4.f, 5.f, 6.f};
+  s->setEntityTransform(id, xf);
+  {
+    auto snap = s->snapshot();
+    bool found = false;
+    for (auto const &e : snap->entities)
+      if (e.id == id && e.local.translation.x == 4.f && e.local.translation.y == 5.f)
+        found = true;
+    REQUIRE(found);
+  }
+  auto child = s->createEditorEntity("child", {}, id);
+  REQUIRE(child.isValid());
+  CHECK_THROWS_AS(s->setEntityParent(id, child), std::invalid_argument);
+  s->destroyEntity(id);
+  {
+    auto snap = s->snapshot();
+    for (auto const &e : snap->entities) {
+      CHECK(e.id != id);
+      CHECK(e.id != child);
+    }
+  }
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+}

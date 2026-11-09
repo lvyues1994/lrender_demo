@@ -1,9 +1,14 @@
 #include "editor/EditorScene.h"
 
 #include <QCoreApplication>
+#include <algorithm>
+#include <queue>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace demo::editor {
+
 EditorScene::EditorScene() {
   if (!QCoreApplication::instance())
     throw std::logic_error("EditorScene requires QCoreApplication");
@@ -32,6 +37,20 @@ void EditorScene::markDirty(entt::entity e) {
     registry_.emplace<Dirty>(e);
 }
 
+bool EditorScene::wouldCreateCycle(entt::entity e, entt::entity newParent) const {
+  if (e == newParent)
+    return true;
+  auto walk = newParent;
+  for (;;) {
+    if (walk == e)
+      return true;
+    auto const *hier = registry_.try_get<Hierarchy>(walk);
+    if (!hier || !hier->parent)
+      return false;
+    walk = *hier->parent;
+  }
+}
+
 entt::entity EditorScene::create(std::string name, lr::core::Transform local,
                                  std::optional<entt::entity> parent) {
   requireGui();
@@ -48,7 +67,6 @@ entt::entity EditorScene::create(std::string name, lr::core::Transform local,
 void EditorScene::setName(entt::entity e, std::string name) {
   requireGui();
   registry_.get<Name>(e).value = std::move(name);
-  // Name is editor-only; no World sync required.
 }
 
 void EditorScene::setLocalTransform(entt::entity e, lr::core::Transform local) {
@@ -59,11 +77,13 @@ void EditorScene::setLocalTransform(entt::entity e, lr::core::Transform local) {
 
 void EditorScene::setParent(entt::entity e, std::optional<entt::entity> parent) {
   requireGui();
+  if (!registry_.valid(e))
+    throw std::invalid_argument("EditorScene: invalid entity");
   if (parent) {
     if (!registry_.valid(*parent))
       throw std::invalid_argument("EditorScene: invalid parent");
-    if (*parent == e)
-      throw std::invalid_argument("EditorScene: entity cannot parent itself");
+    if (wouldCreateCycle(e, *parent))
+      throw std::invalid_argument("EditorScene: parent would create a hierarchy cycle");
   }
   registry_.get<Hierarchy>(e).parent = parent;
   markDirty(e);
@@ -77,20 +97,42 @@ void EditorScene::setMeshMaterial(entt::entity e, lr::core::MeshId mesh,
   markDirty(e);
 }
 
+std::vector<entt::entity> EditorScene::collectSubtree(entt::entity root) const {
+  std::vector<entt::entity> out;
+  std::vector<entt::entity> stack{root};
+  std::unordered_set<std::uint32_t> seen;
+  while (!stack.empty()) {
+    auto e = stack.back();
+    stack.pop_back();
+    auto key = static_cast<std::uint32_t>(entt::to_integral(e));
+    if (!seen.insert(key).second)
+      continue;
+    out.push_back(e);
+    for (auto [child, hier] : registry_.view<Hierarchy>().each()) {
+      if (hier.parent && *hier.parent == e)
+        stack.push_back(child);
+    }
+  }
+  return out;
+}
+
 void EditorScene::destroy(entt::entity e) {
   requireGui();
   if (!registry_.valid(e))
     return;
-  if (auto const *link = registry_.try_get<WorldLink>(e))
-    pendingWorldDestroys_.push_back(link->id);
-  // Clear child parent pointers that referenced e.
-  for (auto [child, hier] : registry_.view<Hierarchy>().each()) {
-    if (hier.parent && *hier.parent == e) {
-      hier.parent = std::nullopt;
-      markDirty(child);
-    }
+  // CASCADE: remove entire subtree from registry. World cascade-destroys descendants
+  // when the root World entity is destroyed, so only queue the root's WorldLink.
+  auto subtree = collectSubtree(e);
+  if (auto const *link = registry_.try_get<WorldLink>(e)) {
+    if (link->id.isValid())
+      pendingWorldDestroys_.push_back(link->id);
   }
-  registry_.destroy(e);
+  for (auto node : subtree) {
+    // Descendants' World ids die with the root — do not queue them (avoids double-free
+    // and prevents "recreate dead link" ghosts).
+    if (registry_.valid(node))
+      registry_.destroy(node);
+  }
 }
 
 entt::entity EditorScene::adoptWorldEntity(lr::core::EntityId worldEntity, std::string name,
@@ -100,6 +142,8 @@ entt::entity EditorScene::adoptWorldEntity(lr::core::EntityId worldEntity, std::
   requireGui();
   if (!worldEntity.isValid())
     throw std::invalid_argument("EditorScene: invalid world entity");
+  if (parent && !registry_.valid(*parent))
+    throw std::invalid_argument("EditorScene: invalid parent");
   auto e = registry_.create();
   registry_.emplace<Name>(e, Name{std::move(name)});
   registry_.emplace<LocalTransform>(e, LocalTransform{local});
@@ -107,20 +151,78 @@ entt::entity EditorScene::adoptWorldEntity(lr::core::EntityId worldEntity, std::
   registry_.emplace<MeshRef>(e, MeshRef{mesh});
   registry_.emplace<MaterialRef>(e, MaterialRef{material});
   registry_.emplace<WorldLink>(e, WorldLink{worldEntity});
-  // Already present in World — not Dirty.
+  registry_.emplace<Installed>(e);
   return e;
 }
 
-void EditorScene::clear(bool destroyWorld) {
+void EditorScene::clear(bool destroyWorldEntities) {
   requireGui();
-  if (destroyWorld) {
-    for (auto [e, link] : registry_.view<WorldLink>().each())
-      pendingWorldDestroys_.push_back(link.id);
+  if (destroyWorldEntities) {
+    for (auto [e, link] : registry_.view<WorldLink>().each()) {
+      if (registry_.all_of<Installed>(e))
+        continue; // installer journal owns these World entities
+      if (link.id.isValid())
+        pendingWorldDestroys_.push_back(link.id);
+    }
   }
   registry_.clear();
 }
 
-void EditorScene::resetAuthoring() { clear(false); }
+void EditorScene::clearForModelSwitch() {
+  // Installer will release Installed World entities; editor-created ones must go now.
+  clear(true);
+}
+
+std::vector<entt::entity> EditorScene::topologicalDirty() const {
+  // Kahn: parents before children among Dirty entities (and their Dirty ancestors).
+  std::vector<entt::entity> dirty;
+  for (auto e : registry_.view<Dirty>())
+    dirty.push_back(e);
+  if (dirty.empty())
+    return dirty;
+
+  std::unordered_set<std::uint32_t> dirtySet;
+  for (auto e : dirty)
+    dirtySet.insert(static_cast<std::uint32_t>(entt::to_integral(e)));
+
+  std::unordered_map<std::uint32_t, int> indeg;
+  std::unordered_map<std::uint32_t, std::vector<entt::entity>> children;
+  for (auto e : dirty) {
+    auto key = static_cast<std::uint32_t>(entt::to_integral(e));
+    indeg.emplace(key, 0);
+  }
+  for (auto e : dirty) {
+    auto const &hier = registry_.get<Hierarchy>(e);
+    if (!hier.parent)
+      continue;
+    auto pk = static_cast<std::uint32_t>(entt::to_integral(*hier.parent));
+    if (dirtySet.count(pk)) {
+      children[pk].push_back(e);
+      indeg[static_cast<std::uint32_t>(entt::to_integral(e))]++;
+    }
+  }
+  std::queue<entt::entity> q;
+  for (auto e : dirty) {
+    auto key = static_cast<std::uint32_t>(entt::to_integral(e));
+    if (indeg[key] == 0)
+      q.push(e);
+  }
+  std::vector<entt::entity> order;
+  while (!q.empty()) {
+    auto e = q.front();
+    q.pop();
+    order.push_back(e);
+    auto key = static_cast<std::uint32_t>(entt::to_integral(e));
+    for (auto child : children[key]) {
+      auto ck = static_cast<std::uint32_t>(entt::to_integral(child));
+      if (--indeg[ck] == 0)
+        q.push(child);
+    }
+  }
+  if (order.size() != dirty.size())
+    throw std::logic_error("EditorScene: dirty hierarchy cycle detected at sync");
+  return order;
+}
 
 void EditorScene::syncToWorld(lr::scene::World &world) {
   requireGui();
@@ -130,50 +232,39 @@ void EditorScene::syncToWorld(lr::scene::World &world) {
   }
   pendingWorldDestroys_.clear();
 
-  // Parents before children: iterate until no Dirty remains or progress stalls.
-  for (int pass = 0; pass < 8 && dirtyCount() > 0; ++pass) {
-    std::vector<entt::entity> batch;
-    for (auto e : registry_.view<Dirty>())
-      batch.push_back(e);
-    for (auto e : batch) {
-      if (!registry_.all_of<Dirty>(e))
-        continue;
-      auto const &local = registry_.get<LocalTransform>(e).value;
-      auto const parent = registry_.get<Hierarchy>(e).parent;
-      if (parent && !registry_.all_of<WorldLink>(*parent))
-        continue; // wait for parent sync
+  auto order = topologicalDirty();
+  for (auto e : order) {
+    if (!registry_.valid(e) || !registry_.all_of<Dirty>(e))
+      continue;
+    auto const &local = registry_.get<LocalTransform>(e).value;
+    auto const parent = registry_.get<Hierarchy>(e).parent;
+    if (parent && !registry_.all_of<WorldLink>(*parent))
+      throw std::logic_error("EditorScene::syncToWorld: parent missing WorldLink");
 
-      std::optional<lr::core::EntityId> worldParent;
-      if (parent) {
-        worldParent = registry_.get<WorldLink>(*parent).id;
-      }
+    std::optional<lr::core::EntityId> worldParent;
+    if (parent)
+      worldParent = registry_.get<WorldLink>(*parent).id;
 
-      if (auto *link = registry_.try_get<WorldLink>(e)) {
-        if (!world.isAlive(link->id)) {
-          // Recreate if World entity was lost.
-          auto created = world.createEntity(local, worldParent);
-          link->id = created;
-        } else {
-          world.setParent(link->id, worldParent);
-          world.setTransform(link->id, local);
-        }
-        if (auto const *mesh = registry_.try_get<MeshRef>(e)) {
-          if (auto const *mat = registry_.try_get<MaterialRef>(e))
-            world.setRenderable(link->id, {mesh->id, mat->id});
-        }
-      } else {
-        auto created = world.createEntity(local, worldParent);
-        registry_.emplace<WorldLink>(e, WorldLink{created});
-        if (auto const *mesh = registry_.try_get<MeshRef>(e)) {
-          if (auto const *mat = registry_.try_get<MaterialRef>(e))
-            world.setRenderable(created, {mesh->id, mat->id});
-        }
+    if (auto *link = registry_.try_get<WorldLink>(e)) {
+      // Never recreate a dead WorldLink (probe 1: cascade destroy left stale child links).
+      if (!world.isAlive(link->id))
+        throw std::logic_error("EditorScene::syncToWorld: WorldLink not alive");
+      world.setParent(link->id, worldParent);
+      world.setTransform(link->id, local);
+      if (auto const *mesh = registry_.try_get<MeshRef>(e)) {
+        if (auto const *mat = registry_.try_get<MaterialRef>(e))
+          world.setRenderable(link->id, {mesh->id, mat->id});
       }
-      registry_.remove<Dirty>(e);
+    } else {
+      auto created = world.createEntity(local, worldParent);
+      registry_.emplace<WorldLink>(e, WorldLink{created});
+      if (auto const *mesh = registry_.try_get<MeshRef>(e)) {
+        if (auto const *mat = registry_.try_get<MaterialRef>(e))
+          world.setRenderable(created, {mesh->id, mat->id});
+      }
     }
+    registry_.remove<Dirty>(e);
   }
-  if (dirtyCount() > 0)
-    throw std::logic_error("EditorScene::syncToWorld: unresolved dirty entities (hierarchy cycle?)");
 }
 
 std::size_t EditorScene::entityCount() const noexcept {

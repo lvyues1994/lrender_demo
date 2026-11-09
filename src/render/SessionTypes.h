@@ -1,5 +1,6 @@
 #pragma once
 #include <lr/core/Scene.h>
+#include <lr/core/Math.h>
 #include <lr/render/Renderer.h>
 #include <cstdint>
 #include <functional>
@@ -11,6 +12,24 @@
 #include <vector>
 namespace demo {
 struct ModelId { std::string value; };
+// Opaque editor handle — no entt types escape into UI translation units (I3).
+struct EditorEntityId {
+  std::uint32_t value = 0xFFFFFFFFu;
+  constexpr bool isValid() const noexcept { return value != 0xFFFFFFFFu; }
+  friend constexpr bool operator==(EditorEntityId a, EditorEntityId b) noexcept {
+    return a.value == b.value;
+  }
+  friend constexpr bool operator!=(EditorEntityId a, EditorEntityId b) noexcept {
+    return !(a == b);
+  }
+};
+struct EditorEntitySnapshot {
+  EditorEntityId id{};
+  std::string name;
+  lr::core::Transform local = lr::core::Transform::identity();
+  std::optional<EditorEntityId> parent;
+  bool installed = false;
+};
 using AssetRequestId = std::uint64_t;
 using SessionGeneration = std::uint64_t;
 enum class PipelineKind { Visibility, Pathtrace, PathtraceInteractive };
@@ -63,6 +82,8 @@ struct SessionSnapshot {
     std::optional<RenderError> error; // last reported issue; life identifies active/terminal failure
     std::string backend, device;
     std::vector<std::string> warnings, assetNotices;
+    // Immutable editor scene projection for UI (E4 will enrich; E2 lists TRS/name/parent).
+    std::vector<EditorEntitySnapshot> entities;
 };
 using SessionSnapshotPtr = std::shared_ptr<SessionSnapshot const>;
 using Done = std::function<void(Result<std::monostate>)>;

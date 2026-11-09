@@ -13,10 +13,7 @@ green() { printf '\033[32m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 
 resolve_session() {
-  if [[ -n "${XDG_SESSION_ID:-}" ]]; then
-    echo "$XDG_SESSION_ID"
-    return
-  fi
+  # Match binary: DISPLAY (ignore Remote) first, then XDG_SESSION_ID, then sole graphical.
   local display="${DISPLAY:-}"
   local bare="${display%%.*}"
   local id match=""
@@ -32,7 +29,7 @@ resolve_session() {
     active="$(printf '%s\n' "$props" | sed -n 's/^Active=//p')"
     remote="$(printf '%s\n' "$props" | sed -n 's/^Remote=//p')"
     local sd="${sess_display%%.*}"
-    if [[ -n "$bare" && -n "$sess_display" && ( "$sd" == "$bare" || "$sess_display" == "$display" ) ]]; then
+    if [[ "$remote" != "yes" && -n "$bare" && -n "$sess_display" && ( "$sd" == "$bare" || "$sess_display" == "$display" ) ]]; then
       match="$id"
     fi
     if [[ "$class" == "user" && "$remote" != "yes" && ( "$type" == "x11" || "$type" == "wayland" ) && "$active" == "yes" ]]; then
@@ -41,6 +38,10 @@ resolve_session() {
   done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
   if [[ -n "$match" ]]; then
     echo "$match"
+    return
+  fi
+  if [[ -n "${XDG_SESSION_ID:-}" ]]; then
+    echo "$XDG_SESSION_ID"
     return
   fi
   if [[ ${#graphical[@]} -eq 1 ]]; then
@@ -104,26 +105,23 @@ require_ctest_passed() {
   local name="$1"
   local log="$2"
   local rc="$3"
+  # m2: Skipped → INCOMPLETE (exit 2 path) before Passed-line checks.
+  if grep -Eq 'Skipped|\*\*\*Skipped|SKIP_RETURN_CODE|black-flash SKIP|exit code[: ]+77' "$log"; then
+    red "INCOMPLETE: $name SKIPPED"
+    tail -40 "$log"
+    skipped=1
+    return 1
+  fi
   if grep -Eq 'No tests were found|0 tests failed out of 0' "$log" && ! grep -Eq "Test #.*${name}|1/1 Test" "$log"; then
     red "FAIL: $name — no tests found"
     tail -40 "$log"
     failed=1
     return 1
   fi
-  if ! grep -Eq "Test +#[0-9]+: ${name}[ .]+\*+Passed|${name}[ .]+Passed" "$log" \
-     && ! grep -Eq "^[0-9]+/[0-9]+ Test[ ]+#[0-9]+: ${name}[ .]+Passed" "$log"; then
-    # ctest -V typically: "1/1 Test #26: e2e_shared_black_flash ...........   Passed"
-    if ! grep -F "$name" "$log" | grep -Eq 'Passed'; then
-      red "FAIL: $name — Passed line missing (rc=$rc)"
-      tail -60 "$log"
-      failed=1
-      return 1
-    fi
-  fi
-  if grep -Eq 'Skipped|\*\*\*Skipped|SKIP_RETURN_CODE|black-flash SKIP|exit code[: ]+77' "$log"; then
-    red "INCOMPLETE: $name SKIPPED"
-    tail -40 "$log"
-    skipped=1
+  if ! grep -F "$name" "$log" | grep -Eq 'Passed'; then
+    red "FAIL: $name — Passed line missing (rc=$rc)"
+    tail -60 "$log"
+    failed=1
     return 1
   fi
   if [[ $rc -ne 0 ]]; then

@@ -30,8 +30,10 @@ struct AssetInstall::Impl {
       throw std::logic_error("AssetInstall requires World GUI owner");
   }
   void release(Bundle &b) {
+    // Editor may have cascade-destroyed some installed entities already (I1).
     for (auto id : b.entities)
-      world.destroyEntity(id);
+      if (world.isAlive(id))
+        world.destroyEntity(id);
     for (auto id : b.meshes)
       world.resources().releaseMesh(id);
     for (auto id : b.materials)
@@ -229,8 +231,7 @@ std::vector<lr::core::MeshId> const &AssetInstall::installedMeshes() const {
 }
 std::vector<lr::core::MaterialId> const &AssetInstall::installedPartMaterials() const {
   impl_->check();
-  // Rebuild lazily from installed entities' renderables via materialMap order of parts.
-  // Stored parallel to entities at step time — add side vector.
+  // Parallel to installed.entities / meshes — filled in step() when each part is created.
   return impl_->installed.partMaterials;
 }
 } // namespace demo

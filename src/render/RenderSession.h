@@ -2,7 +2,6 @@
 #include "SessionTypes.h"
 #include "presentation/PresentationAdapter.h"
 #include <lr/scene/World.h>
-#include "editor/EditorScene.h"
 namespace demo {
 class AssetLoader; // P8 nonowning injection only; no invented implementation
 // Construct and issue serial commands on GUI; inputs are initialized owned resources.
@@ -18,6 +17,8 @@ class AssetLoader; // P8 nonowning injection only; no invented implementation
 // Destruction detaches UI observers, not accepted producer/cleanup work. A nonempty
 // SubmitFrame override must eventually report any possibly accepted work even after
 // throwing; only the real renderer path has a terminal renderer-barrier fallback.
+//
+// E2 editor: value commands only (no mutable EditorScene&). entt lives in the pimpl.
 class RenderSession {
 public:
   RenderSession(std::unique_ptr<lr::runtime::Runtime>, std::unique_ptr<lr::render::Renderer>,
@@ -33,8 +34,6 @@ public:
   void selectModel(ModelId);
   void setNormalMapping(bool);
   void setAmbient(float);
-  editor::EditorScene &editorScene();
-  editor::EditorScene const &editorScene() const;
   void setRoughness(float);
   void setCamera(CameraState);
   void setRenderOptions(RenderOptions);
@@ -45,6 +44,14 @@ public:
   SessionSnapshotPtr snapshot() const;
   // Nonowning: ApplicationLifetime keeps the loader alive through session drain.
   void setAssetLoader(AssetLoader &);
+
+  // --- E2 editor value commands (GUI thread) ---
+  EditorEntityId createEditorEntity(std::string name, lr::core::Transform local = {},
+                                    std::optional<EditorEntityId> parent = std::nullopt);
+  void setEntityTransform(EditorEntityId, lr::core::Transform);
+  void setEntityParent(EditorEntityId, std::optional<EditorEntityId> parent);
+  void setEntityMeshMaterial(EditorEntityId, lr::core::MeshId, lr::core::MaterialId);
+  void destroyEntity(EditorEntityId);
 
 private:
   struct Impl;

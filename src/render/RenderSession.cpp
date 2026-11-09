@@ -152,6 +152,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       value->backend = info.backend;
       value->device = info.deviceName;
     }
+    publishEditorEntities(*value);
     return value;
   }
   void publish() {
@@ -484,8 +485,12 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   void destroyResources(bool ambiguousBarrier) {
     phase = Destroying;
     // All load receipts retired; only GUI touches World, even during terminal cleanup.
-    if (installer)
-      editor.resetAuthoring();
+    if (installer) {
+      editor.clearForModelSwitch();
+      // World may still be alive here; flush editor-created destroys before teardown.
+      if (resources.world)
+        editor.syncToWorld(*resources.world);
+    }
     installer.reset();
     auto bundle = std::make_shared<Resources>(std::move(resources));
     auto self = shared_from_this();
@@ -566,8 +571,45 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     publish();
   }
 
+  EditorEntityId toId(entt::entity e) const {
+    return EditorEntityId{static_cast<std::uint32_t>(entt::to_integral(e))};
+  }
+  entt::entity fromId(EditorEntityId id) const {
+    return entt::entity{id.value};
+  }
+
+  void publishEditorEntities(SessionSnapshot &value) const {
+    value.entities.clear();
+    for (auto e : editor.registry().view<editor::Name, editor::LocalTransform, editor::Hierarchy>()) {
+      EditorEntitySnapshot snap;
+      snap.id = toId(e);
+      snap.name = editor.registry().get<editor::Name>(e).value;
+      snap.local = editor.registry().get<editor::LocalTransform>(e).value;
+      auto parent = editor.registry().get<editor::Hierarchy>(e).parent;
+      if (parent)
+        snap.parent = toId(*parent);
+      snap.installed = editor.registry().all_of<editor::Installed>(e);
+      value.entities.push_back(std::move(snap));
+    }
+  }
+
+  // I1: before replacing the installed model, roll back staging, release journal
+  // (isAlive-safe), destroy editor-created World entities, clear dirty/WorldLinks.
+  void prepareEditorForInstall() {
+    if (installer && installer->active())
+      installer->rollback();
+    editor.clearForModelSwitch();
+    // Flush pending World destroys before AssetInstall mutates the scene.
+    if (resources.world)
+      editor.syncToWorld(*resources.world);
+  }
+
   void adoptInstalledIntoEditor() {
-    editor.resetAuthoring();
+    // Installer already released previous installed entities; clear leftover authoring
+    // without double-destroying Installed (none left) / destroy editor leftovers.
+    editor.clearForModelSwitch();
+    if (resources.world)
+      editor.syncToWorld(*resources.world);
     if (!installer)
       return;
     auto asset = installer->current();
@@ -596,6 +638,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       auto candidate = std::move(readyAsset);
       readyAsset.reset();
       try {
+        prepareEditorForInstall();
         installer->begin(std::move(candidate));
       } catch (std::invalid_argument const &e) {
         // begin's preflight precedes all World mutations: old scene remains usable.
@@ -1093,12 +1136,69 @@ void RenderSession::resume() {
 }
 void RenderSession::requestStop() { impl_->stop(); }
 SessionSnapshotPtr RenderSession::snapshot() const { return impl_->snapshot(); }
-editor::EditorScene &RenderSession::editorScene() {
-  impl_->owner();
-  return impl_->editor;
+EditorEntityId RenderSession::createEditorEntity(std::string name, lr::core::Transform local,
+                                                 std::optional<EditorEntityId> parent) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked())
+    return {};
+  std::optional<entt::entity> p;
+  if (parent) {
+    if (!parent->isValid())
+      throw std::invalid_argument("createEditorEntity: invalid parent");
+    p = s.fromId(*parent);
+  }
+  auto e = s.editor.create(std::move(name), local, p);
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+  return s.toId(e);
 }
-editor::EditorScene const &RenderSession::editorScene() const {
-  impl_->owner();
-  return impl_->editor;
+void RenderSession::setEntityTransform(EditorEntityId id, lr::core::Transform local) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked() || !id.isValid())
+    return;
+  s.editor.setLocalTransform(s.fromId(id), local);
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+}
+void RenderSession::setEntityParent(EditorEntityId id, std::optional<EditorEntityId> parent) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked() || !id.isValid())
+    return;
+  std::optional<entt::entity> p;
+  if (parent) {
+    if (!parent->isValid())
+      throw std::invalid_argument("setEntityParent: invalid parent");
+    p = s.fromId(*parent);
+  }
+  s.editor.setParent(s.fromId(id), p);
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+}
+void RenderSession::setEntityMeshMaterial(EditorEntityId id, lr::core::MeshId mesh,
+                                          lr::core::MaterialId material) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked() || !id.isValid())
+    return;
+  s.editor.setMeshMaterial(s.fromId(id), mesh, material);
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+}
+void RenderSession::destroyEntity(EditorEntityId id) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked() || !id.isValid())
+    return;
+  s.editor.destroy(s.fromId(id));
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
 }
 } // namespace demo
