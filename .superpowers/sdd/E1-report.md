@@ -3,7 +3,7 @@
 - **Branch:** `feat/qt-vulkan-demo`
 - **BASE:** `80528df881d0c1f5c22d8c26f7e11221d986bbaa`
 - **Parent (本提交之前):** `6d3c6fa785426ced605b2c4bd3cc648f132d46bb`
-- **HEAD:** 本提交 tip — `git rev-parse HEAD`（含本报告的那次 ordinary commit）
+- **HEAD (本提交):** `e7a9956046fe60d95d0866fe0bc6a9aae353c6f5`
 - **Asia/Shanghai:** 2026-11-09T17:01:00+08:00
 
 ## m1–m6 修改
