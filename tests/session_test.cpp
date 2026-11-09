@@ -1,3 +1,4 @@
+#include "presentation/NativeSurfaceFactory.h"
 #include "presentation/ReadbackAdapter.h"
 #include "render/RenderSession.h"
 #include "support/FakePresentation.h"
@@ -1140,4 +1141,67 @@ TEST_CASE("session/soft-rebuild-resize-pipeline-keeps-path-without-release") {
   for (std::size_t i = 2; i < h.jobs.size(); ++i) h.complete(i);
   stop(s, h);
   CHECK(std::count(stages.begin(), stages.end(), "release") == 1);
+}
+
+TEST_CASE("session/soft-rebuild-hide-zero-keeps-path-without-release") {
+  Harness h;
+  std::vector<std::string> stages;
+  auto adapter = std::make_unique<ReadbackAdapter>(h.imageEvents(), [&](auto stage, Done done) {
+    stages.push_back(stage);
+    done(std::monostate{});
+  });
+  auto r = resources();
+  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world), std::move(adapter),
+                  h.submit(), h.events());
+  start(s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() == 1; }));
+  h.complete(0);
+  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
+  s.setVisible(false);
+  REQUIRE(test::until([&] { return s.snapshot()->life == LifeState::Paused || !s.snapshot()->performance.inFlight; }));
+  CHECK(std::count(stages.begin(), stages.end(), "release") == 0);
+  CHECK(std::count(stages.begin(), stages.end(), "prepare") == 1);
+  s.setViewport({{0, 0}, {0, 0}, 1});
+  REQUIRE(test::until([&] { return true; }, 50));
+  CHECK(std::count(stages.begin(), stages.end(), "release") == 0);
+  s.setViewport({{8, 8}, {8, 8}, 1});
+  s.setVisible(true);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 2; }));
+  CHECK(std::count(stages.begin(), stages.end(), "release") == 0);
+  CHECK(std::count(stages.begin(), stages.end(), "prepare") == 1);
+  for (std::size_t i = 1; i < h.jobs.size(); ++i) h.complete(i);
+  stop(s, h);
+  CHECK(std::count(stages.begin(), stages.end(), "release") == 1);
+}
+TEST_CASE("session/soft-rebuild-resize-uses-host-physical-not-cached-wsi") {
+  Harness h;
+  struct Spy : ReadbackAdapter {
+    lr::core::ivec2 cached{160, 120};
+    lr::core::ivec2 described{0, 0};
+    explicit Spy(PresentationEvents e)
+        : ReadbackAdapter(std::move(e)) {}
+    ViewportExtent resolvedViewport(ViewportExtent v) const override {
+      v.physical = resolveSharedPhysicalExtent(v.physical, cached);
+      return v;
+    }
+    TargetDesc describeTarget(ViewportExtent const &extent) const override {
+      const_cast<Spy *>(this)->described = extent.physical;
+      return ReadbackAdapter::describeTarget(extent);
+    }
+  };
+  auto spy = std::make_unique<Spy>(h.imageEvents());
+  auto *raw = spy.get();
+  auto r = resources();
+  RenderSession s(std::move(r.runtime), std::move(r.renderer), std::move(r.world), std::move(spy),
+                  h.submit(), h.events());
+  start(s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() == 1; }));
+  CHECK(raw->described == lr::core::ivec2{8, 8});
+  h.complete(0);
+  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
+  s.setViewport({{220, 160}, {220, 160}, 1});
+  REQUIRE(test::until([&] { return h.jobs.size() >= 2; }));
+  CHECK(raw->described == lr::core::ivec2{220, 160});
+  for (std::size_t i = 1; i < h.jobs.size(); ++i) h.complete(i);
+  stop(s, h);
 }

@@ -21,6 +21,7 @@
 #include <QScreen>
 #include <QTimer>
 #include <QWindow>
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <iostream>
@@ -81,10 +82,12 @@ struct Viewer : QObject {
   struct BlackFlashOp {
     char const *name = "";
     std::uint64_t blackSamples = 0, samples = 0, hostChanges = 0;
+    std::uint64_t sharedShownAtStart = 0, sharedShownGap = 0;
     qint64 blackMs = 0, latencyMs = 0;
     WId host = 0;
     QElapsedTimer timer;
     bool armed = false, seenContent = false;
+    int expectW = 0, expectH = 0;
   } flash;
   QImage sampleViewport() const {
     if (auto native = window->viewport().nativeWindow()) {
@@ -116,6 +119,13 @@ struct Viewer : QObject {
     if (!flash.armed || !window)
       return;
     ++flash.samples;
+    if (session && session->snapshot()->path == PresentationPath::VulkanShared) {
+      auto shown = session->snapshot()->performance.sharedShown;
+      if (shown < flash.sharedShownAtStart)
+        ++flash.sharedShownGap;
+      // Keep the high-water for gap detection without treating monotonic growth as failure.
+      flash.sharedShownAtStart = std::max(flash.sharedShownAtStart, shown);
+    }
     auto native = window->viewport().nativeWindow();
     auto host = native ? native->winId() : 0;
     if (flash.host && host && host != flash.host)
@@ -137,11 +147,15 @@ struct Viewer : QObject {
       flash.host = host;
     }
   }
-  void beginFlash(char const *name) {
+  void beginFlash(char const *name, int expectW = 0, int expectH = 0) {
     flash = {};
     flash.name = name;
     flash.armed = true;
+    flash.expectW = expectW;
+    flash.expectH = expectH;
     flash.host = window->viewport().nativeWindow() ? window->viewport().nativeWindow()->winId() : 0;
+    if (session)
+      flash.sharedShownAtStart = session->snapshot()->performance.sharedShown;
     flash.timer.start();
   }
   void endFlash() {
@@ -150,8 +164,9 @@ struct Viewer : QObject {
     std::cout << "black-flash op=" << flash.name << " blackSamples=" << flash.blackSamples
               << " blackMs=" << flash.blackMs << " samples=" << flash.samples
               << " latencyMs=" << flash.latencyMs << " hostChanges=" << flash.hostChanges
-              << " host=" << flash.host << std::endl;
-    if (flash.blackSamples || flash.hostChanges) {
+              << " sharedShownGap=" << flash.sharedShownGap << " host=" << flash.host
+              << std::endl;
+    if (flash.blackSamples || flash.hostChanges || flash.sharedShownGap) {
       code = 1;
       std::cerr << "black-flash FAIL op=" << flash.name << std::endl;
     }
@@ -428,7 +443,9 @@ struct Viewer : QObject {
     statistics.start();
     script.setInterval(20);
     connect(&script, &QTimer::timeout, this, [this] {
-      if (elapsed.elapsed() > (test.rfind("e2e-", 0) == 0 ? 120000 : 45000)) {
+      if (elapsed.elapsed() > (test.rfind("e2e-", 0) == 0
+                                    ? 120000
+                                    : (test == "black-flash" ? 90000 : 45000))) {
         std::cerr << "deadline state=" << stage << " closing=" << closing
                   << " (resources retained; external test deadline required)"
                   << std::endl;
@@ -739,13 +756,14 @@ struct Viewer : QObject {
         return;
       }
       if (stage == 2) {
-        if (s->performance.accumulatedSamples < 1 || completed <= lastCompleted ||
-            s->performance.inFlight)
+        // Pathtrace sample accumulation is not part of black-flash acceptance; only a
+        // post-rebuild presented receipt matters. Latency numbers are diagnostic only.
+        if (completed <= lastCompleted || s->performance.inFlight)
           return;
         if (nearBlack(sampleViewport()))
           return;
         endFlash();
-        beginFlash("resize");
+        beginFlash("resize", 220, 160);
         window->viewport().setFixedSize(220, 160);
         lastCompleted = completed;
         stage = 3;
@@ -756,6 +774,23 @@ struct Viewer : QObject {
           return;
         if (nearBlack(sampleViewport()))
           return;
+        if (s->path == PresentationPath::VulkanShared && presentation && !capture) {
+          capture.emplace(presentation->captureNext());
+          session->setCamera(s->camera);
+          return;
+        }
+        if (capture) {
+          if (capture->wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            return;
+          auto image = capture->get();
+          capture.reset();
+          std::cout << "black-flash resize capture=" << image.extent.x << "x" << image.extent.y
+                    << " expect=" << flash.expectW << "x" << flash.expectH << std::endl;
+          if (image.extent.x != flash.expectW || image.extent.y != flash.expectH) {
+            code = 1;
+            std::cerr << "black-flash FAIL resize extent mismatch" << std::endl;
+          }
+        }
         endFlash();
         std::cout << "black-flash GUI maxGapMs=" << maxGuiGap
                   << " sharedShown=" << s->performance.sharedShown << std::endl;

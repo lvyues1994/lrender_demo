@@ -10,10 +10,16 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <lr/core/Primitives.h>
 #include <vulkan/vulkan.h>
 class QWindow;
 class QWidget;
 namespace demo {
+// Shared presentation extent policy (P9): live host/XCB physical pixels win over a
+// stale presenter-creation WSI cache; cached WSI remains the fallback when the host
+// has not reported a positive extent yet (initial prepare).
+lr::core::ivec2 resolveSharedPhysicalExtent(lr::core::ivec2 hostReported,
+                                            lr::core::ivec2 cachedWsi) noexcept;
 using SurfaceCreator = std::function<VkSurfaceKHR(VkInstance)>;
 // This is the actual factory lifecycle policy; not a simulated presenter.
 class NativeSurfacePolicy {

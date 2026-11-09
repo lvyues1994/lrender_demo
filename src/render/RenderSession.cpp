@@ -321,6 +321,9 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
                                  resources.renderer->deviceInfo().backend,
                                  resources.renderer->deviceInfo().deviceName))
       throw std::runtime_error("stale soft presentation candidate");
+    std::cout << "soft target extent=" << state.viewport().physical.x << "x"
+              << state.viewport().physical.y << " logical=" << state.viewport().logical.x
+              << "x" << state.viewport().logical.y << std::endl;
     targetFresh = true;
     performance.accumulatedSamples = 0;
     pump.markDirty();
@@ -329,12 +332,9 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   void softRecreateTarget() {
     // Keep host/presenter (or readback path) alive so the last swapchain/image remains
     // visible until the replacement target presents. Hard teardown still used for native
-    // loss, path changes, and final shutdown.
-    if (!pathPrepared || phase != Ready) {
-      hardRebuild = true;
-      beginDrain();
-      return;
-    }
+    // loss, path changes, and final shutdown. Callers only enter when pathPrepared && Ready.
+    if (!pathPrepared || phase != Ready)
+      throw std::logic_error("soft recreate requires prepared Ready presentation path");
     auto finish = [this] {
       try {
         destroyTarget();

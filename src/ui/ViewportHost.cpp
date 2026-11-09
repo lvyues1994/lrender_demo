@@ -1,4 +1,5 @@
 #include "ViewportHost.h"
+#include <lr/core/Primitives.h>
 #include "presentation/ReadbackAdapter.h"
 #include <QMouseEvent>
 #include <QPainter>
@@ -71,10 +72,17 @@ void ViewportHost::paintEvent(QPaintEvent *) {
 }
 void ViewportHost::notifyExtent() {
   auto d = devicePixelRatioF();
-  if (commands_.viewport)
-    commands_.viewport(
-        {{width(), height()}, {qRound(width() * d), qRound(height() * d)}, d},
-        isVisible() && width() > 0 && height() > 0);
+  if (!commands_.viewport)
+    return;
+  lr::core::ivec2 physical{qRound(width() * d), qRound(height() * d)};
+  if (native_) {
+    auto pixels = native_->physicalExtent(); // actual XCB pixels when available
+    if (pixels.width() > 0 && pixels.height() > 0)
+      physical = {pixels.width(), pixels.height()};
+  }
+  commands_.viewport({{width(), height()}, physical, d},
+                     isVisible() && width() > 0 && height() > 0 &&
+                         physical.x > 0 && physical.y > 0);
 }
 void ViewportHost::resizeEvent(QResizeEvent *) {
   if (native_)

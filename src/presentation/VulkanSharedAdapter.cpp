@@ -234,9 +234,8 @@ TargetDesc VulkanSharedAdapter::describeTarget(ViewportExtent const &v) const {
 ViewportExtent VulkanSharedAdapter::resolvedViewport(ViewportExtent v) const {
   auto s = impl_;
   s->owner();
-  if (s->path == PresentationPath::VulkanShared && s->extent.x > 0 &&
-      s->extent.y > 0)
-    v.physical = s->extent;
+  if (s->path == PresentationPath::VulkanShared)
+    v.physical = resolveSharedPhysicalExtent(v.physical, s->extent);
   return v;
 }
 void VulkanSharedAdapter::setFrameContext(SessionGeneration gen,

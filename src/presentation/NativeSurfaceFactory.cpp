@@ -15,6 +15,14 @@
 #include <stdexcept>
 #include <xcb/xcb.h>
 namespace demo {
+lr::core::ivec2 resolveSharedPhysicalExtent(lr::core::ivec2 hostReported,
+                                            lr::core::ivec2 cachedWsi) noexcept {
+  // Live host/XCB physical pixels are authoritative after soft resize. Cached WSI
+  // from presenter construction is only a fallback before the host reports pixels.
+  if (hostReported.x > 0 && hostReported.y > 0)
+    return hostReported;
+  return cachedWsi;
+}
 NativeSurfacePolicy::NativeSurfacePolicy() : owner_(std::this_thread::get_id()) {}
 void NativeSurfacePolicy::requireOwner() const {
     if (std::this_thread::get_id() != owner_)
