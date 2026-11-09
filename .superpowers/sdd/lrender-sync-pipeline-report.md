@@ -3,8 +3,7 @@
 Time: 2026-11-09T15:00:17+0800 (Asia/Shanghai)
 Branch: feat/qt-vulkan-demo
 BASE: 589737cea8fe94c1086a681a062cd58f85d49119
-HEAD: 05c93cd76f1fc6d90d9a753d2cc89669f6eb5a14
-Feat commit: 9c1ab0872832c4391bef84d3f01b3677cd0ca8c0
+HEAD: aa3b48d17e28ac2203b26d7c19741c2631fbd81c (tip; feat 9c1ab08; docs 98cb8c2..aa3b48d)
 
 ## 1) Upstream sync
 
