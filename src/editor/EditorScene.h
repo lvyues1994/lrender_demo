@@ -63,10 +63,20 @@ public:
                                   std::vector<lr::core::MeshId> const &meshes,
                                   std::vector<lr::core::MaterialId> const &materials);
 
+  // Cancel/fail remirror: sync Dirty into World while old Installed mirrors still
+  // exist, drop them, then remirrorInstalledFromWorld (World SoT). Same entry used
+  // by RenderSession::readoptInstalledAfterRollback and random op6.
+  void readoptInstalledFromWorld(lr::scene::World &world,
+                                 std::vector<lr::core::EntityId> const &worldEntities,
+                                 std::vector<std::string> const &names,
+                                 std::vector<lr::core::MeshId> const &meshes,
+                                 std::vector<lr::core::MaterialId> const &materials);
+
   void syncToWorld(lr::scene::World &world);
 
   std::size_t entityCount() const noexcept;
   std::size_t dirtyCount() const noexcept;
+  std::size_t pendingWorldDestroyCount() const noexcept;
 
   bool wouldCreateCycle(entt::entity e, entt::entity newParent) const;
 

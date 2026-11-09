@@ -343,8 +343,89 @@ TEST_CASE("editor/i2-readopt-preserves-installed-under-user") {
   CHECK_THROWS_AS(s.setParent(u, newP0), std::invalid_argument);
 }
 
+
+TEST_CASE("editor/probe12-two-valid-reparents-same-frame") {
+  EditorScene s;
+  auto w = lr::scene::makeWorld({});
+  auto a = s.create("A", {});
+  auto x = s.create("X", {}, a);
+  auto b = s.create("B", {}, x);
+  s.syncToWorld(*w);
+  // World: B → X → A. Two legal editor reparents in one Dirty batch:
+  // X → root, then A → B yields final A → B → X (no cycle). Applying A before X
+  // in World would temporarily form A → B → X → A.
+  s.setParent(x, std::nullopt);
+  s.setParent(a, b);
+  CHECK_NOTHROW(s.syncToWorld(*w));
+  demo::test::assertEditorWorldConsistent(s, *w);
+  CHECK_FALSE(s.registry().get<Hierarchy>(x).parent.has_value());
+  REQUIRE(s.registry().get<Hierarchy>(a).parent.has_value());
+  CHECK(*s.registry().get<Hierarchy>(a).parent == b);
+  REQUIRE(s.registry().get<Hierarchy>(b).parent.has_value());
+  CHECK(*s.registry().get<Hierarchy>(b).parent == x);
+  auto aw = s.registry().get<WorldLink>(a).id;
+  auto xw = s.registry().get<WorldLink>(x).id;
+  auto bw = s.registry().get<WorldLink>(b).id;
+  CHECK_FALSE(w->parentOf(xw).has_value());
+  CHECK(*w->parentOf(bw) == xw);
+  CHECK(*w->parentOf(aw) == bw);
+}
+
+TEST_CASE("editor/i3-dirty-edits-survive-readopt") {
+  EditorScene s;
+  auto w = lr::scene::makeWorld({});
+  auto mesh = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+  auto mat = w->resources().addMaterial({});
+  auto p0w = w->createEntity({}, std::nullopt);
+  auto p1w = w->createEntity({}, std::nullopt);
+  w->setRenderable(p0w, {mesh, mat});
+  w->setRenderable(p1w, {mesh, mat});
+  auto p0 = s.adoptWorldEntity(p0w, "part0", {}, mesh, mat);
+  auto p1 = s.adoptWorldEntity(p1w, "part1", {}, mesh, mat);
+  auto c = s.create("C", {}, p0);
+  s.syncToWorld(*w);
+  demo::test::assertEditorWorldConsistent(s, *w);
+
+  // Install-window edits stay Dirty (no frame / no sync yet).
+  lr::core::Transform cxf{};
+  cxf.translation = {3.f, 0.f, 0.f};
+  s.setLocalTransform(c, cxf);
+  auto d = s.create("D", {}, p0);
+  lr::core::Transform p1xf{};
+  p1xf.translation = {9.f, 0.f, 0.f};
+  s.setLocalTransform(p1, p1xf);
+  REQUIRE(s.dirtyCount() >= 2);
+
+  // Same sequence as RenderSession::readoptInstalledAfterRollback (I3 order).
+  s.readoptInstalledFromWorld(*w, {p0w, p1w}, {"part0", "part1"}, {mesh, mesh}, {mat, mat});
+  demo::test::assertEditorWorldConsistent(s, *w);
+
+  entt::entity newP0{}, newP1{};
+  for (auto [e, link] : s.registry().view<WorldLink, Installed>().each()) {
+    if (link.id == p0w)
+      newP0 = e;
+    if (link.id == p1w)
+      newP1 = e;
+  }
+  REQUIRE(s.registry().valid(newP0));
+  REQUIRE(s.registry().valid(newP1));
+  REQUIRE(s.registry().valid(c));
+  REQUIRE(s.registry().valid(d));
+  REQUIRE(s.registry().get<Hierarchy>(c).parent.has_value());
+  CHECK(*s.registry().get<Hierarchy>(c).parent == newP0);
+  CHECK(s.registry().get<LocalTransform>(c).value.translation.x == doctest::Approx(3.f));
+  REQUIRE(s.registry().get<Hierarchy>(d).parent.has_value());
+  CHECK(*s.registry().get<Hierarchy>(d).parent == newP0);
+  CHECK(s.registry().get<LocalTransform>(newP1).value.translation.x == doctest::Approx(9.f));
+}
+
 TEST_CASE("editor/random-ops-editor-world-invariant") {
-  auto runSeed = [](std::uint32_t seed, int steps) {
+  struct Counts {
+    std::uint64_t op[8]{};
+    std::uint64_t editRejected = 0;
+  };
+  auto runSeed = [](std::uint32_t seed, int steps, Counts &counts) {
     std::mt19937 rng(seed);
     EditorScene s;
     auto w = lr::scene::makeWorld({});
@@ -364,7 +445,6 @@ TEST_CASE("editor/random-ops-editor-world-invariant") {
         return std::nullopt;
       return live[std::uniform_int_distribution<std::size_t>(0, live.size() - 1)(rng)];
     };
-    // Seed scene with two installed parts.
     for (int i = 0; i < 2; ++i) {
       auto wid = w->createEntity({}, std::nullopt);
       w->setRenderable(wid, {mesh, mat});
@@ -376,16 +456,23 @@ TEST_CASE("editor/random-ops-editor-world-invariant") {
 
     for (int step = 0; step < steps; ++step) {
       int op = std::uniform_int_distribution<int>(0, 7)(rng);
-      try {
-        if (op == 0) { // create
+      ++counts.op[op];
+      auto edit = [&](auto &&fn) {
+        try {
+          fn();
+        } catch (std::invalid_argument const &) {
+          ++counts.editRejected;
+        }
+      };
+      if (op == 0) {
+        edit([&] {
           lr::core::Transform xf{};
           xf.translation = {float(step % 11), 0.f, 0.f};
-          auto parent = pick();
-          s.create("e" + std::to_string(step), xf, parent);
-        } else if (op == 1) { // destroy
+          s.create("e" + std::to_string(step), xf, pick());
+        });
+      } else if (op == 1) {
+        edit([&] {
           if (auto e = pick()) {
-            // Skip if Installed or any Installed descendant (cascade would drop
-            // installer-owned World entities from this fixture).
             bool skip = false;
             std::vector<entt::entity> stack{*e};
             std::unordered_set<std::uint32_t> seen;
@@ -406,48 +493,54 @@ TEST_CASE("editor/random-ops-editor-world-invariant") {
             if (!skip)
               s.destroy(*e);
           }
-        } else if (op == 2) { // reparent
+        });
+      } else if (op == 2) {
+        edit([&] {
           auto a = pick();
           auto b = pick();
           if (a && b && *a != *b)
             s.setParent(*a, *b);
           else if (a)
             s.setParent(*a, std::nullopt);
-        } else if (op == 3) { // move
+        });
+      } else if (op == 3) {
+        edit([&] {
           if (auto e = pick()) {
             lr::core::Transform xf = s.registry().get<LocalTransform>(*e).value;
             xf.translation.x = float((step * 3) % 17);
             s.setLocalTransform(*e, xf);
           }
-        } else if (op == 4) { // mesh/mat on non-installed
+        });
+      } else if (op == 4) {
+        edit([&] {
           if (auto e = pick()) {
             if (!s.registry().all_of<Installed>(*e))
               s.setMeshMaterial(*e, mesh, mat);
           }
-        } else if (op == 5) { // sync
-          s.syncToWorld(*w);
-          demo::test::assertEditorWorldConsistent(s, *w);
-        } else if (op == 6) { // remirror (cancel path)
-          s.syncToWorld(*w);
-          s.forgetInstalledMirrors();
-          std::vector<std::string> names;
-          std::vector<lr::core::MeshId> meshes;
-          std::vector<lr::core::MaterialId> mats;
-          for (std::size_t i = 0; i < installedWorld.size(); ++i) {
-            if (!w->isAlive(installedWorld[i]))
-              continue;
-            names.push_back("part" + std::to_string(i));
-            meshes.push_back(mesh);
-            mats.push_back(mat);
-          }
-          std::vector<lr::core::EntityId> alive;
-          for (auto id : installedWorld)
-            if (w->isAlive(id))
-              alive.push_back(id);
-          if (!alive.empty())
-            s.remirrorInstalledFromWorld(*w, alive, names, meshes, mats);
-          demo::test::assertEditorWorldConsistent(s, *w);
-        } else { // create under installed
+        });
+      } else if (op == 5) {
+        // Sync must not throw (I4); do not swallow.
+        s.syncToWorld(*w);
+        demo::test::assertEditorWorldConsistent(s, *w);
+      } else if (op == 6) {
+        // Same function as RenderSession readopt path (I3 order).
+        std::vector<lr::core::EntityId> alive;
+        std::vector<std::string> names;
+        std::vector<lr::core::MeshId> meshes;
+        std::vector<lr::core::MaterialId> mats;
+        for (std::size_t i = 0; i < installedWorld.size(); ++i) {
+          if (!w->isAlive(installedWorld[i]))
+            continue;
+          alive.push_back(installedWorld[i]);
+          names.push_back("part" + std::to_string(i));
+          meshes.push_back(mesh);
+          mats.push_back(mat);
+        }
+        if (!alive.empty())
+          s.readoptInstalledFromWorld(*w, alive, names, meshes, mats);
+        demo::test::assertEditorWorldConsistent(s, *w);
+      } else {
+        edit([&] {
           refreshLive();
           entt::entity inst = entt::null;
           for (auto e : live)
@@ -457,17 +550,26 @@ TEST_CASE("editor/random-ops-editor-world-invariant") {
             }
           if (s.registry().valid(inst))
             s.create("c" + std::to_string(step), {}, inst);
-        }
-      } catch (std::invalid_argument const &) {
-        // Illegal edits rejected at edit time — OK.
-      } catch (std::logic_error const &) {
-        // Cycle / sync guards — OK if caught here; must not leave divergence after sync.
+        });
       }
     }
     s.syncToWorld(*w);
     demo::test::assertEditorWorldConsistent(s, *w);
   };
 
+  Counts total{};
+  // Quick gate (also used under ASan); expanded suite below.
   for (std::uint32_t seed : {1u, 2u, 42u, 99u, 12345u})
-    runSeed(seed, 800);
+    runSeed(seed, 800, total);
+
+  Counts stress{};
+  for (std::uint32_t seed = 1; seed <= 40; ++seed)
+    runSeed(seed, 3000, stress);
+  // Visible counts for the report (doctest MESSAGE).
+  MESSAGE("random stress op counts: ",
+          stress.op[0], " create, ", stress.op[1], " destroy, ", stress.op[2], " reparent, ",
+          stress.op[3], " move, ", stress.op[4], " mesh, ", stress.op[5], " sync, ",
+          stress.op[6], " readopt, ", stress.op[7], " create-under; editRejected=",
+          stress.editRejected);
+  CHECK(stress.op[5] + stress.op[6] > 0);
 }

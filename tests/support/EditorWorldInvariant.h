@@ -70,8 +70,19 @@ inline void assertEditorWorldConsistent(demo::editor::EditorScene const &scene,
       REQUIRE(mat);
       CHECK(mesh->id == renderable->mesh);
       CHECK(mat->id == renderable->material);
+    } else if (mesh && mesh->id.isValid()) {
+      // Editor has a live MeshRef but World has no renderable — divergence.
+      FAIL("editor MeshRef present but World has no renderable");
     }
+    CHECK_FALSE(reg.all_of<demo::editor::Dirty>(e));
   }
+  // Every editor entity has a WorldLink after sync; no pending destroys left in scene API
+  // Name count == WorldLink count; pendingWorldDestroyCount == 0.
+  auto names = static_cast<std::size_t>(reg.view<demo::editor::Name>().size());
+  auto linksOnly = static_cast<std::size_t>(reg.view<demo::editor::WorldLink>().size());
+  CHECK(names == linksOnly);
+  CHECK(reg.view<demo::editor::Dirty>().size() == 0);
+  CHECK(scene.pendingWorldDestroyCount() == 0);
   CHECK(links == world.entityCount());
 }
 

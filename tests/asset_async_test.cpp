@@ -837,6 +837,14 @@ TEST_CASE("asset_async/reverse-divergence-installed-under-user") {
     return p0UnderU && p1Moved;
   }));
 
+  {
+    auto baseExtract = session.snapshot()->performance.deltaExtractions;
+    REQUIRE(test::until([&] {
+      auto snap = session.snapshot();
+      return snap->performance.deltaExtractions > baseExtract &&
+             snap->performance.inFlight == 0;
+    }));
+  }
   armCancel = true;
   session.selectModel({"diablo"});
   REQUIRE(test::until([&] {
@@ -873,6 +881,229 @@ TEST_CASE("asset_async/reverse-divergence-installed-under-user") {
     CHECK_THROWS_AS(session.setEntityParent(u, newP0), std::invalid_argument);
     CHECK(session.snapshot()->life != LifeState::Failed);
   }
+  stop(session, h);
+}
+
+
+TEST_CASE("asset_async/dirty-edits-during-install-then-cancel") {
+  App app([](auto const &e, auto) -> Result<CpuAssetPtr> {
+    if (e.id.value == "diablo")
+      return fixture(e.id.value, 64);
+    return fixture(e.id.value, 2);
+  });
+  auto r = resources(app);
+  Harness h;
+  RenderSession *owner = nullptr;
+  bool cancelled = false;
+  bool armCancel = false;
+  bool editsApplied = false;
+  auto events = h.events();
+  events.onSnapshot = [&](auto snap) {
+    if (!owner)
+      return;
+    // While installing diablo, apply Dirty edits once (no frame sync until cancel readopt).
+    if (armCancel && snap->assetInstalling && snap->installationParts > 0 && !editsApplied) {
+      editsApplied = true;
+      EditorEntityId part0{}, part1{}, cId{};
+      for (auto const &e : snap->entities) {
+        if (e.installed && e.name.find("/part0") != std::string::npos)
+          part0 = e.id;
+        if (e.installed && e.name.find("/part1") != std::string::npos)
+          part1 = e.id;
+        if (e.name == "C")
+          cId = e.id;
+      }
+      if (part0.isValid() && part1.isValid() && cId.isValid()) {
+        lr::core::Transform cxf{};
+        cxf.translation = {3.f, 0.f, 0.f};
+        owner->setEntityTransform(cId, cxf);
+        owner->createEditorEntity("D", {}, part0);
+        lr::core::Transform p1xf{};
+        p1xf.translation = {9.f, 0.f, 0.f};
+        owner->setEntityTransform(part1, p1xf);
+      }
+    }
+    if (cancelled || !armCancel || !editsApplied)
+      return;
+    if (snap->assetInstalling && snap->installationParts > 0) {
+      cancelled = true;
+      owner->selectModel({"not-in-catalog"});
+    }
+  };
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), std::move(events));
+  owner = &session;
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel && h.image &&
+           h.image->stamp.generation == session.snapshot()->generation;
+  }));
+  EditorEntityId part0{};
+  {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities)
+      if (e.installed && e.name.find("/part0") != std::string::npos)
+        part0 = e.id;
+    REQUIRE(part0.isValid());
+  }
+  auto c = session.createEditorEntity("C", {}, part0);
+  REQUIRE(c.isValid());
+  REQUIRE(test::until([&] {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities)
+      if (e.id.value == c.value && e.parent && e.parent->value == part0.value)
+        return true;
+    return false;
+  }));
+  {
+    auto baseExtract = session.snapshot()->performance.deltaExtractions;
+    REQUIRE(test::until([&] {
+      auto snap = session.snapshot();
+      return snap->performance.deltaExtractions > baseExtract &&
+             snap->performance.inFlight == 0;
+    }));
+  }
+  armCancel = true;
+  session.selectModel({"diablo"});
+  REQUIRE(test::until([&] {
+    return cancelled && editsApplied && !session.snapshot()->assetInstalling &&
+           session.snapshot()->installedModel.has_value() &&
+           session.snapshot()->installedModel->value == "african_head";
+  }));
+  CHECK(session.snapshot()->life != LifeState::Failed);
+  {
+    auto snap = session.snapshot();
+    EditorEntityId newP0{}, newP1{}, dId{};
+    bool cOk = false, dOk = false, p1Ok = false;
+    for (auto const &e : snap->entities) {
+      if (e.installed && e.name.find("/part0") != std::string::npos)
+        newP0 = e.id;
+      if (e.installed && e.name.find("/part1") != std::string::npos)
+        newP1 = e.id;
+      if (e.name == "D")
+        dId = e.id;
+    }
+    REQUIRE(newP0.isValid());
+    REQUIRE(newP1.isValid());
+    REQUIRE(dId.isValid());
+    for (auto const &e : snap->entities) {
+      if (e.id.value == c.value && e.parent && e.parent->value == newP0.value &&
+          e.local.translation.x == 3.f)
+        cOk = true;
+      if (e.id.value == dId.value && e.parent && e.parent->value == newP0.value)
+        dOk = true;
+      if (e.id.value == newP1.value && e.local.translation.x == 9.f)
+        p1Ok = true;
+    }
+    CHECK(cOk);
+    CHECK(dOk);
+    CHECK(p1Ok);
+  }
+  stop(session, h);
+}
+
+
+TEST_CASE("asset_async/fail-select-retains-editor-edits") {
+  App app([](auto const &e, auto) -> Result<CpuAssetPtr> { return fixture(e.id.value, 2); });
+  auto r = resources(app);
+  Harness h;
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), h.events());
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel && h.image &&
+           h.image->stamp.generation == session.snapshot()->generation;
+  }));
+  auto keep = session.createEditorEntity("keep", {});
+  REQUIRE(keep.isValid());
+  {
+    auto snap = session.snapshot();
+    bool found = false;
+    for (auto const &e : snap->entities)
+      if (e.name == "keep")
+        found = true;
+    REQUIRE(found);
+  }
+  lr::core::Transform xf{};
+  xf.translation = {4.f, 0.f, 0.f};
+  session.setEntityTransform(keep, xf);
+  REQUIRE(test::until([&] {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities)
+      if (e.name == "keep" && e.local.translation.x == 4.f)
+        return true;
+    return false;
+  }));
+  session.selectModel({"not-in-catalog"});
+  REQUIRE(test::until([&] { return !session.snapshot()->assetInstalling; }));
+  CHECK(session.snapshot()->life != LifeState::Failed);
+  {
+    auto snap = session.snapshot();
+    bool keepAt4 = false;
+    for (auto const &e : snap->entities)
+      if (e.name == "keep" && e.local.translation.x == 4.f)
+        keepAt4 = true;
+    CHECK(keepAt4);
+  }
+  stop(session, h);
+}
+
+TEST_CASE("asset_async/commit-new-model-clears-old-editor-edits") {
+  // Design: successful commit runs clearForModelSwitch — prior editor edits are dropped.
+  App app([](auto const &e, auto) -> Result<CpuAssetPtr> { return fixture(e.id.value, 2); });
+  auto r = resources(app);
+  Harness h;
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), h.events());
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel && h.image &&
+           h.image->stamp.generation == session.snapshot()->generation;
+  }));
+  auto keep = session.createEditorEntity("old-edit", {});
+  REQUIRE(keep.isValid());
+  {
+    auto snap = session.snapshot();
+    bool found = false;
+    for (auto const &e : snap->entities)
+      if (e.name == "old-edit")
+        found = true;
+    // Prefer name match — id mapping is covered elsewhere; commit must see the entity.
+    REQUIRE(found);
+    CHECK(snap->life != LifeState::Failed);
+  }
+  session.selectModel({"diablo"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel &&
+           session.snapshot()->installedModel->value == "diablo" &&
+           !session.snapshot()->assetInstalling;
+  }));
+  CHECK(session.snapshot()->life != LifeState::Failed);
+  bool foundOld = false;
+  bool hasPart = false;
+  {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities) {
+      if (e.name == "old-edit")
+        foundOld = true;
+      if (e.installed)
+        hasPart = true;
+    }
+  }
+  CHECK_FALSE(foundOld); // clearForModelSwitch on commit
+  CHECK(hasPart);
   stop(session, h);
 }
 

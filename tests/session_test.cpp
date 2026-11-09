@@ -1393,3 +1393,49 @@ TEST_CASE("session/editor-sync-failure-releases-inflight-and-stop") {
   // stop must complete (would hang 8s+ if stamp leaked).
   stop(*s, h);
 }
+
+TEST_CASE("session/session-two-valid-reparents-same-frame") {
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  auto a = s->createEditorEntity("A", {});
+  auto x = s->createEditorEntity("X", {}, a);
+  auto b = s->createEditorEntity("B", {}, x);
+  REQUIRE(a.isValid());
+  REQUIRE(x.isValid());
+  REQUIRE(b.isValid());
+  REQUIRE(test::until([&] {
+    auto snap = s->snapshot();
+    int n = 0;
+    for (auto const &e : snap->entities)
+      if (e.id.value == a.value || e.id.value == x.value || e.id.value == b.value)
+        ++n;
+    return n == 3;
+  }));
+  // Same-frame Dirty batch: X → root, A → B. Must sync without World cycle / Failed.
+  s->setEntityParent(x, std::nullopt);
+  s->setEntityParent(a, b);
+  REQUIRE(test::until([&] {
+    auto snap = s->snapshot();
+    if (snap->life == LifeState::Failed)
+      return true;
+    bool xRoot = false, aUnderB = false, bUnderX = false;
+    for (auto const &e : snap->entities) {
+      if (e.id.value == x.value && !e.parent)
+        xRoot = true;
+      if (e.id.value == a.value && e.parent && e.parent->value == b.value)
+        aUnderB = true;
+      if (e.id.value == b.value && e.parent && e.parent->value == x.value)
+        bUnderX = true;
+    }
+    return xRoot && aUnderB && bUnderX;
+  }));
+  CHECK(s->snapshot()->life != LifeState::Failed);
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+}
+

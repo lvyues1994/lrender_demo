@@ -247,6 +247,18 @@ void EditorScene::remirrorInstalledFromWorld(
   restoreHierarchyFromWorld(world);
 }
 
+void EditorScene::readoptInstalledFromWorld(
+    lr::scene::World &world, std::vector<lr::core::EntityId> const &worldEntities,
+    std::vector<std::string> const &names, std::vector<lr::core::MeshId> const &meshes,
+    std::vector<lr::core::MaterialId> const &materials) {
+  requireGui();
+  // I3: flush Dirty while Installed mirrors still exist (so parents resolve), then
+  // drop mirrors and rebuild from World SoT. Rollback already completed before call.
+  syncToWorld(world);
+  forgetInstalledMirrors();
+  remirrorInstalledFromWorld(world, worldEntities, names, meshes, materials);
+}
+
 std::vector<entt::entity> EditorScene::topologicalDirty() const {
   // Kahn: parents before children among Dirty entities (and their Dirty ancestors).
   std::vector<entt::entity> dirty;
@@ -304,6 +316,21 @@ void EditorScene::syncToWorld(lr::scene::World &world) {
   // Otherwise an unsynced reparent-away + destroy(oldParent) leaves a dead WorldLink
   // (World cascade-killed the child) or orphans (World parent was never updated).
   auto order = topologicalDirty();
+
+  // I4 phase 1: detach every Dirty entity that already has a WorldLink. Two legal
+  // editor reparents in one batch can still form a transient World cycle if applied
+  // directly against stale World edges (probe12). Detach first, then attach.
+  for (auto e : order) {
+    if (!registry_.valid(e) || !registry_.all_of<Dirty>(e))
+      continue;
+    if (auto *link = registry_.try_get<WorldLink>(e)) {
+      if (!world.isAlive(link->id))
+        throw std::logic_error("EditorScene::syncToWorld: WorldLink not alive");
+      world.setParent(link->id, std::nullopt);
+    }
+  }
+
+  // I4 phase 2: apply final parent/transform (and create) in editor topo order.
   for (auto e : order) {
     if (!registry_.valid(e) || !registry_.all_of<Dirty>(e))
       continue;
@@ -349,6 +376,10 @@ std::size_t EditorScene::entityCount() const noexcept {
 
 std::size_t EditorScene::dirtyCount() const noexcept {
   return registry_.view<Dirty>().size();
+}
+
+std::size_t EditorScene::pendingWorldDestroyCount() const noexcept {
+  return pendingWorldDestroys_.size();
 }
 
 } // namespace demo::editor

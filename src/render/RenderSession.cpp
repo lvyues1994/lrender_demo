@@ -640,13 +640,23 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   // installed. N3: do NOT clearForModelSwitch (that would destroy editor-created
   // entities). Drop Installed mirrors only, then re-adopt installer->installed.
   void readoptInstalledAfterRollback() {
-    // I2: drop Installed mirrors, sync editor-created Dirty into World, then remirror
-    // from World SoT (parents/transforms for installed-under-user, moved parts, and
-    // orphans under installed). No Dirty on restored edges.
-    editor.forgetInstalledMirrors();
-    if (resources.world)
-      editor.syncToWorld(*resources.world);
-    mirrorInstalledIntoEditor();
+    // I3/I2: EditorScene::readoptInstalledFromWorld is the single sequence
+    // (sync Dirty → forget Installed → remirror from World SoT).
+    if (!installer || !resources.world)
+      return;
+    auto asset = installer->current();
+    if (!asset)
+      return;
+    auto const &ents = installer->installedEntities();
+    auto const &meshes = installer->installedMeshes();
+    auto const &mats = installer->installedPartMaterials();
+    if (ents.size() != meshes.size() || ents.size() != mats.size())
+      throw std::logic_error("AssetInstall entity/mesh/material size mismatch");
+    std::vector<std::string> names;
+    names.reserve(ents.size());
+    for (std::size_t i = 0; i < ents.size(); ++i)
+      names.push_back(asset->model.value + "/part" + std::to_string(i));
+    editor.readoptInstalledFromWorld(*resources.world, ents, names, meshes, mats);
   }
 
   bool installStep() {
