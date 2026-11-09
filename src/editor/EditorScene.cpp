@@ -171,6 +171,26 @@ EditorScene::materialBaseOf(lr::core::MaterialId id) const {
   return it->second;
 }
 
+std::uint64_t EditorScene::meshKey(lr::core::MeshId id) noexcept {
+  return static_cast<std::uint64_t>(id.value);
+}
+
+void EditorScene::rememberMeshBounds(lr::core::MeshId id, lr::core::Aabb bounds) {
+  requireGui();
+  if (!id.isValid())
+    return;
+  meshBounds_[meshKey(id)] = bounds;
+}
+
+std::optional<lr::core::Aabb> EditorScene::meshBoundsOf(lr::core::MeshId id) const {
+  if (!id.isValid())
+    return std::nullopt;
+  auto it = meshBounds_.find(meshKey(id));
+  if (it == meshBounds_.end())
+    return std::nullopt;
+  return it->second;
+}
+
 void EditorScene::queueReleaseOverrideCopy(entt::entity e) {
   if (auto const *ovr = registry_.try_get<MaterialOverride>(e)) {
     if (ovr->copyId.isValid())
@@ -295,6 +315,7 @@ void EditorScene::clear(bool destroyWorldEntities) {
   }
   registry_.clear();
   materialBases_.clear();
+  meshBounds_.clear();
 }
 
 void EditorScene::clearForModelSwitch() {

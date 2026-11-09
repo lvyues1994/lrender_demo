@@ -69,6 +69,11 @@ public:
   void beginEditMerge(); // E5 gizmo drag / continuous slider
   void endEditMerge();
 
+  // E5: World-mesh gizmo visuals (shared + readback). Excluded from editor picking.
+  void setGizmoVisuals(EditorEntityId primary, std::uint32_t mode, std::uint32_t space);
+  void clearGizmoVisuals();
+  std::size_t gizmoVisualEntityCount() const noexcept; // tests
+
 private:
   struct Impl;
   std::shared_ptr<Impl> impl_;

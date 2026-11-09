@@ -477,3 +477,33 @@ TEST_CASE("ui/edit-menu-undo-redo-actions") {
   redo->trigger();
   CHECK(redos == 1);
 }
+
+TEST_CASE("ui/gizmo-toolbar-wer-and-local-world") {
+  UiCommands c;
+  MainWindow window(c);
+  window.show();
+  auto *tr = window.findChild<QAction *>("gizmoTranslate");
+  auto *ro = window.findChild<QAction *>("gizmoRotate");
+  auto *sc = window.findChild<QAction *>("gizmoScale");
+  auto *loc = window.findChild<QAction *>("gizmoLocal");
+  auto *wor = window.findChild<QAction *>("gizmoWorld");
+  REQUIRE(tr);
+  REQUIRE(ro);
+  REQUIRE(sc);
+  REQUIRE(loc);
+  REQUIRE(wor);
+  CHECK(window.viewport().gizmoMode() == editor::GizmoMode::Translate);
+  ro->trigger();
+  CHECK(window.viewport().gizmoMode() == editor::GizmoMode::Rotate);
+  sc->trigger();
+  CHECK(window.viewport().gizmoMode() == editor::GizmoMode::Scale);
+  tr->trigger();
+  CHECK(window.viewport().gizmoMode() == editor::GizmoMode::Translate);
+  wor->trigger();
+  CHECK(window.viewport().gizmoSpace() == editor::GizmoSpace::World);
+  loc->trigger();
+  CHECK(window.viewport().gizmoSpace() == editor::GizmoSpace::Local);
+  CHECK(tr->shortcut() == QKeySequence(QStringLiteral("W")));
+  CHECK(ro->shortcut() == QKeySequence(QStringLiteral("E")));
+  CHECK(sc->shortcut() == QKeySequence(QStringLiteral("R")));
+}

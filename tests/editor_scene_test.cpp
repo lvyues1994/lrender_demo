@@ -762,3 +762,18 @@ TEST_CASE("editor/material-override-cow-releases-on-clear-and-destroy") {
   CHECK_FALSE(deltaDestroy.removed.materials.empty());
   CHECK(w->resources().counts().materials == baseline);
 }
+
+TEST_CASE("editor/mesh-bounds-catalog-remembers-and-looks-up") {
+  demo::editor::EditorScene s;
+  lr::core::MeshId id{};
+  id.value = 7;
+  lr::core::Aabb box{{-3.f, -1.f, -2.f}, {3.f, 1.f, 2.f}};
+  s.rememberMeshBounds(id, box);
+  auto got = s.meshBoundsOf(id);
+  REQUIRE(got);
+  CHECK(got->min.x == doctest::Approx(-3.f));
+  CHECK(got->max.x == doctest::Approx(3.f));
+  lr::core::MeshId missing{};
+  missing.value = 99;
+  CHECK_FALSE(s.meshBoundsOf(missing).has_value());
+}

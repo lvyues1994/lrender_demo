@@ -31,6 +31,8 @@ struct UiCommands {
   std::function<void(EditorEntityId)> clearEntityCamera;
   std::function<void()> beginEditMerge;
   std::function<void()> endEditMerge;
+  // mode/space as GizmoMode/GizmoSpace ordinals; primary may be invalid to clear.
+  std::function<void(EditorEntityId, std::uint32_t /*mode*/, std::uint32_t /*space*/)> syncGizmoVisuals;
 };
 class ViewportHost : public QWidget {
 public:
@@ -76,6 +78,7 @@ private:
   bool orbiting_ = false;
   bool gizmoDragging_ = false;
   bool mergeOpen_ = false;
+  bool dragUniform_ = false;
   editor::GizmoAxis dragAxis_ = editor::GizmoAxis::None;
   editor::GizmoMode gizmoMode_ = editor::GizmoMode::Translate;
   editor::GizmoSpace gizmoSpace_ = editor::GizmoSpace::Local;
@@ -89,14 +92,10 @@ private:
   QImage image_;
   std::unique_ptr<NativeSurfaceFactory> native_;
   bool nativeWasExposed_ = false;
-  // Shared-path display-only overlay (native child covers Qt siblings).
-  QWidget *sharedOverlay_ = nullptr;
-
   void notifyExtent();
   ViewportExtent currentExtent() const;
-  void ensureSharedOverlay();
-  void syncSharedOverlayGeometry();
-  void paintGizmo(QPainter &p);
+  void paintGizmo(QPainter &p); // readback HUD only; shared uses World gizmo meshes
+  void notifyGizmoVisuals();
   void cancelGizmoDrag();
   bool hitGizmo(QPoint const &pos, editor::GizmoAxis *outAxis) const;
   void pickAt(QPoint const &pos);

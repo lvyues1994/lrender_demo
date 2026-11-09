@@ -2035,3 +2035,47 @@ TEST_CASE("session/material-desc-cow-release-baseline-after-clear-undo-destroy")
   stop(*s, h);
 }
 
+
+TEST_CASE("session/gizmo-visuals-pixel-visible-on-readback") {
+  // Real renderer + readback: emissive gizmo shafts must tint some pixels.
+  Harness h;
+  auto s = session(h, true);
+  CameraState cam;
+  cam.camera.position = {2.5f, 2.0f, 3.5f};
+  cam.camera.target = {0.f, 0.f, 0.f};
+  cam.camera.up = {0, 1, 0};
+  cam.camera.verticalFov = 0.8f;
+  cam.camera.nearPlane = 0.1f;
+  cam.camera.farPlane = 100.f;
+  s->setCamera(cam);
+  auto id = s->createEditorEntity("gizmo-anchor", lr::core::Transform::identity());
+  start(*s, false);
+  s->setViewport({{96, 96}, {96, 96}, 1.0});
+  s->setGizmoVisuals(id, /*Translate*/ 0u, /*World*/ 1u);
+  REQUIRE(test::until([&] { return h.images >= 1 && h.lastImage && h.lastImage->image; }));
+  auto const &img = *h.lastImage->image;
+  REQUIRE(img.extent.x >= 32);
+  REQUIRE(img.pixels.size() >= std::size_t(img.extent.x * img.extent.y));
+  int hot = 0;
+  int rDom = 0, gDom = 0, bDom = 0;
+  for (int y = 0; y < img.extent.y; ++y) {
+    for (int x = 0; x < img.extent.x; ++x) {
+      auto p = img.pixels[std::size_t(y * img.extent.x + x)];
+      int r = int(p & 255), g = int((p >> 8) & 255), b = int((p >> 16) & 255);
+      int luma = (r + g + b) / 3;
+      if (luma < 40)
+        continue;
+      ++hot;
+      if (r > g + 20 && r > b + 20)
+        ++rDom;
+      if (g > r + 20 && g > b + 20)
+        ++gDom;
+      if (b > r + 20 && b > g + 20)
+        ++bDom;
+    }
+  }
+  CHECK(hot >= 8);
+  // At least one axis color should dominate some bright pixels.
+  CHECK(rDom + gDom + bDom >= 4);
+  stop(*s, h);
+}

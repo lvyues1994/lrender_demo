@@ -299,6 +299,10 @@ struct Viewer : QObject {
       if (session)
         session->endEditMerge();
     };
+    commands.syncGizmoVisuals = [this](auto id, auto mode, auto space) {
+      if (session)
+        session->setGizmoVisuals(id, mode, space);
+    };
     commands.stop = [this] { requestStop(); };
     window = std::make_unique<MainWindow>(commands);
     if (!test.empty())

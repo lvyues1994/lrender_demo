@@ -1944,3 +1944,95 @@ TEST_CASE("session/material-desc-seeds-textures-from-base-when-factors-only") {
   REQUIRE(found);
   stop(session, h);
 }
+
+TEST_CASE("session/pick-bounds-use-real-mesh-aabb-not-unit-box") {
+  // Catalog id "floor" with a custom decode that returns an elongated box so a
+  // unit-cube fallback (±0.5) cannot accidentally pass.
+  App app([](auto const &e, auto) -> Result<CpuAssetPtr> {
+    auto a = std::make_shared<CpuAsset>();
+    a->model = {e.id.value};
+    auto mesh = lr::core::makeBox({2.f, 0.25f, 0.25f});
+    a->bounds = lr::core::boundsOf(mesh);
+    auto handle = std::make_shared<lr::core::MeshData const>(std::move(mesh));
+    MaterialAsset m;
+    a->materials.push_back(m);
+    a->parts.push_back({handle, 0});
+    return CpuAssetPtr(a);
+  });
+  auto r = resources(app);
+  Harness h;
+  RenderSession session(
+      std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+      std::make_unique<ReadbackAdapter>(h.presentation()), h.fake(), h.events());
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"floor"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel &&
+           session.snapshot()->installedModel->value == "floor";
+  }));
+  auto snap = session.snapshot();
+  REQUIRE_FALSE(snap->entities.empty());
+  auto const &ent = snap->entities.front();
+  REQUIRE(ent.worldBounds);
+  // Real mesh AABB (±2, ±0.25, ±0.25). Unit-box fallback would be ±0.5 all axes.
+  CHECK(ent.worldBounds->max.x == doctest::Approx(2.f).epsilon(1e-3));
+  CHECK(ent.worldBounds->max.y == doctest::Approx(0.25f).epsilon(1e-3));
+  CHECK(ent.worldBounds->min.x == doctest::Approx(-2.f).epsilon(1e-3));
+  CHECK(ent.worldBounds->max.y != doctest::Approx(0.5f));
+  stop(session, h);
+}
+
+TEST_CASE("session/gizmo-visuals-enter-render-delta-and-clear") {
+  App app;
+  auto r = resources(app);
+  Harness h;
+  RenderSession session(
+      std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+      std::make_unique<ReadbackAdapter>(h.presentation()), h.fake(), h.events());
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"floor"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel &&
+           session.snapshot()->installedModel->value == "floor";
+  }));
+  auto id = session.snapshot()->entities.front().id;
+  auto framesBefore = h.frames.size();
+  session.setGizmoVisuals(id, /*Translate*/ 0u, /*Local*/ 0u);
+  REQUIRE(test::until([&] { return h.frames.size() > framesBefore; }));
+  CHECK(session.gizmoVisualEntityCount() >= 3);
+  // Latest submitted delta should include more instances than the installed part alone.
+  auto const &delta = h.frames.back().delta;
+  CHECK(delta.instances.size() >= 4); // 1 part + >=3 gizmo shafts/tips
+  session.clearGizmoVisuals();
+  auto frames2 = h.frames.size();
+  REQUIRE(test::until([&] { return h.frames.size() > frames2; }));
+  CHECK(session.gizmoVisualEntityCount() == 0);
+  stop(session, h);
+}
+
+TEST_CASE("session/gizmo-visuals-work-under-shared-presentation-mode") {
+  // Shared vs readback only changes PresentationAdapter; gizmos live in World.
+  App app;
+  auto r = resources(app);
+  Harness h;
+  RenderSession session(
+      std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+      std::make_unique<ReadbackAdapter>(h.presentation()), h.fake(), h.events());
+  session.setAssetLoader(*app.loader);
+  // Startup-only policy: request shared before start (fallback OK).
+  session.setPresentationMode(PresentationPath::VulkanShared, true);
+  start(session);
+  session.selectModel({"floor"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel &&
+           session.snapshot()->installedModel->value == "floor";
+  }));
+  auto id = session.snapshot()->entities.front().id;
+  session.setGizmoVisuals(id, 0u, 0u);
+  REQUIRE(test::until([&] { return session.gizmoVisualEntityCount() >= 3; }));
+  session.setGizmoVisuals(id, /*Rotate*/ 1u, /*World*/ 1u);
+  REQUIRE(test::until([&] { return session.gizmoVisualEntityCount() >= 3; }));
+  stop(session, h);
+}

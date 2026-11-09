@@ -72,4 +72,41 @@ lr::core::Transform applyWorldTranslationDelta(lr::core::Transform const &local,
                                                lr::core::mat4 const &parentWorld,
                                                lr::core::vec3 const &worldDelta) noexcept;
 
+// Minimum positive scale component after gizmo scale (never 0 / negative).
+inline constexpr float kMinScale = 1e-3f;
+
+// Signed angle (radians) about axis from ray0∩plane to ray1∩plane. nullopt if either misses.
+std::optional<float> rotateAngleAroundAxis(Ray const &ray0, Ray const &ray1,
+                                           lr::core::vec3 const &origin,
+                                           lr::core::vec3 const &axisDir) noexcept;
+
+// Apply world-space rotation delta about axis through the entity origin; solve back to local.
+lr::core::Transform applyWorldRotationDelta(lr::core::Transform const &local,
+                                            lr::core::mat4 const &parentWorld,
+                                            lr::core::vec3 const &axisDir,
+                                            float radians) noexcept;
+
+// Scale factor = axisParam(ray1)/axisParam(ray0); 1 if press param ~0.
+float scaleFactorAlongAxis(Ray const &ray0, Ray const &ray1,
+                           lr::core::vec3 const &origin,
+                           lr::core::vec3 const &axisDir) noexcept;
+
+// Apply scale factor on one axis (or uniform); clamps each component to >= kMinScale.
+lr::core::Transform applyScaleDelta(lr::core::Transform const &local,
+                                    lr::core::mat4 const &parentWorld,
+                                    lr::core::vec3 const &axisDir,
+                                    float factor, bool uniform) noexcept;
+
+// Rotate ring: ray near circle in plane ⊥ axisDir, radius ringRadius (pixel threshold).
+GizmoHandleHit hitRotateHandle(Ray const &ray, lr::core::vec3 const &origin,
+                               lr::core::vec3 const &axisDir, float ringRadius,
+                               lr::core::CameraDesc const &camera, ViewportExtent const &extent,
+                               float pixelThreshold) noexcept;
+
+// Scale handle reuses translate-style segment hit (tip); Screen axis = uniform center.
+GizmoHandleHit hitScaleHandle(Ray const &ray, lr::core::vec3 const &origin,
+                              lr::core::vec3 const &axisDir, float axisLength,
+                              lr::core::CameraDesc const &camera, ViewportExtent const &extent,
+                              float pixelThreshold) noexcept;
+
 } // namespace demo::editor

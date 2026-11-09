@@ -40,5 +40,10 @@ private:
   void refreshEditActions();
   QAction *undoAction_ = nullptr;
   QAction *redoAction_ = nullptr;
+  QAction *gizmoTranslateAction_ = nullptr;
+  QAction *gizmoRotateAction_ = nullptr;
+  QAction *gizmoScaleAction_ = nullptr;
+  QAction *gizmoLocalAction_ = nullptr;
+  QAction *gizmoWorldAction_ = nullptr;
 };
 } // namespace demo

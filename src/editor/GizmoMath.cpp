@@ -188,4 +188,133 @@ lr::core::Transform applyWorldTranslationDelta(lr::core::Transform const &local,
   return out;
 }
 
+
+std::optional<float> rayPlaneT(Ray const &ray, lr::core::vec3 const &origin,
+                               lr::core::vec3 const &normal) noexcept {
+  float denom = tc::dot(ray.direction, normal);
+  if (std::fabs(denom) < 1e-8f)
+    return std::nullopt;
+  float t = tc::dot(origin - ray.origin, normal) / denom;
+  if (t < 0.f)
+    return std::nullopt;
+  return t;
+}
+
+std::optional<float> rotateAngleAroundAxis(Ray const &ray0, Ray const &ray1,
+                                           lr::core::vec3 const &origin,
+                                           lr::core::vec3 const &axisDir) noexcept {
+  auto axis = normalizeSafe(axisDir);
+  auto t0 = rayPlaneT(ray0, origin, axis);
+  auto t1 = rayPlaneT(ray1, origin, axis);
+  if (!t0 || !t1)
+    return std::nullopt;
+  lr::core::vec3 p0 = ray0.origin + ray0.direction * *t0;
+  lr::core::vec3 p1 = ray1.origin + ray1.direction * *t1;
+  lr::core::vec3 v0 = p0 - origin;
+  lr::core::vec3 v1 = p1 - origin;
+  // Reject hits too close to the axis (unstable angle).
+  if (tc::length(v0) < 1e-5f || tc::length(v1) < 1e-5f)
+    return std::nullopt;
+  v0 = normalizeSafe(v0);
+  v1 = normalizeSafe(v1);
+  float sinA = tc::dot(tc::cross(v0, v1), axis);
+  float cosA = tc::dot(v0, v1);
+  return std::atan2(sinA, cosA);
+}
+
+lr::core::Transform applyWorldRotationDelta(lr::core::Transform const &local,
+                                            lr::core::mat4 const &parentWorld,
+                                            lr::core::vec3 const &axisDir,
+                                            float radians) noexcept {
+  auto worldMat = localToWorld(local, parentWorld);
+  auto worldXf = lr::core::decomposed(worldMat);
+  auto delta = lr::core::Rotation::axisAngle(normalizeSafe(axisDir), radians);
+  lr::core::mat3 composed =
+      lr::core::rotationMatrix(delta) * lr::core::rotationMatrix(worldXf.rotation);
+  worldXf.rotation = lr::core::Rotation::fromMatrix(composed);
+  return worldToLocal(worldXf, parentWorld);
+}
+
+float scaleFactorAlongAxis(Ray const &ray0, Ray const &ray1,
+                           lr::core::vec3 const &origin,
+                           lr::core::vec3 const &axisDir) noexcept {
+  auto axis = normalizeSafe(axisDir);
+  float t0 = axisParamOnRay(ray0, origin, axis);
+  float t1 = axisParamOnRay(ray1, origin, axis);
+  if (std::fabs(t0) < 1e-5f)
+    return 1.f;
+  return t1 / t0;
+}
+
+lr::core::Transform applyScaleDelta(lr::core::Transform const &local,
+                                    lr::core::mat4 const & /*parentWorld*/,
+                                    lr::core::vec3 const &axisDir,
+                                    float factor, bool uniform) noexcept {
+  lr::core::Transform out = local;
+  float f = factor;
+  // Negative factors would invert; treat as absolute then clamp.
+  if (f < 0.f)
+    f = std::fabs(f);
+  auto clampComp = [](float s) { return std::max(s, kMinScale); };
+  if (uniform) {
+    float u = clampComp(out.scale.x * f);
+    out.scale = {u, u, u};
+    return out;
+  }
+  auto axis = normalizeSafe(axisDir);
+  // Map world/local axis direction onto the dominant local scale axis by largest |dot|.
+  float ax = std::fabs(axis.x), ay = std::fabs(axis.y), az = std::fabs(axis.z);
+  if (ax >= ay && ax >= az)
+    out.scale.x = clampComp(out.scale.x * f);
+  else if (ay >= az)
+    out.scale.y = clampComp(out.scale.y * f);
+  else
+    out.scale.z = clampComp(out.scale.z * f);
+  return out;
+}
+
+GizmoHandleHit hitRotateHandle(Ray const &ray, lr::core::vec3 const &origin,
+                               lr::core::vec3 const &axisDir, float ringRadius,
+                               lr::core::CameraDesc const &camera, ViewportExtent const &extent,
+                               float pixelThreshold) noexcept {
+  auto axis = normalizeSafe(axisDir);
+  auto t = rayPlaneT(ray, origin, axis);
+  if (!t)
+    return {};
+  lr::core::vec3 hit = ray.origin + ray.direction * *t;
+  float radial = tc::length(hit - origin);
+  // Compare radial distance to ring in pixels via two projected points.
+  auto pixHit = projectToPixel(camera, extent, hit);
+  // Point on ideal ring in same direction.
+  lr::core::vec3 onRing = origin;
+  if (radial > 1e-5f)
+    onRing = origin + normalizeSafe(hit - origin) * ringRadius;
+  else {
+    // Degenerate: pick any perpendicular.
+    lr::core::vec3 perp = std::fabs(axis.y) < 0.9f ? tc::cross(axis, {0, 1, 0})
+                                                   : tc::cross(axis, {1, 0, 0});
+    onRing = origin + normalizeSafe(perp) * ringRadius;
+  }
+  auto pixRing = projectToPixel(camera, extent, onRing);
+  if (!pixHit || !pixRing)
+    return {};
+  float dx = pixHit->x - pixRing->x, dy = pixHit->y - pixRing->y;
+  float dist = std::sqrt(dx * dx + dy * dy);
+  // Also accept if world radial is close (helps when projection foreshortens).
+  float worldSlack = ringRadius * 0.25f + 0.05f;
+  if (dist > pixelThreshold && std::fabs(radial - ringRadius) > worldSlack)
+    return {};
+  GizmoHandleHit out;
+  out.t = *t;
+  out.axis = GizmoAxis::X; // caller remaps
+  return out;
+}
+
+GizmoHandleHit hitScaleHandle(Ray const &ray, lr::core::vec3 const &origin,
+                              lr::core::vec3 const &axisDir, float axisLength,
+                              lr::core::CameraDesc const &camera, ViewportExtent const &extent,
+                              float pixelThreshold) noexcept {
+  return hitTranslateHandle(ray, origin, axisDir, axisLength, camera, extent, pixelThreshold);
+}
+
 } // namespace demo::editor

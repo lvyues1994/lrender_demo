@@ -51,6 +51,10 @@ public:
   void rememberMaterialBase(lr::core::MaterialId id, lr::core::MaterialDesc desc);
   std::optional<lr::core::MaterialDesc> materialBaseOf(lr::core::MaterialId id) const;
 
+  // E5: local-space mesh AABB keyed by MeshId (install/decode time).
+  void rememberMeshBounds(lr::core::MeshId id, lr::core::Aabb bounds);
+  std::optional<lr::core::Aabb> meshBoundsOf(lr::core::MeshId id) const;
+
   // Cascade-destroy e and all descendants in the registry. Queues a single World
   // destroy for the root WorldLink (World already cascade-destroys descendants).
   void destroy(entt::entity e);
@@ -114,8 +118,10 @@ private:
   std::vector<lr::core::EntityId> pendingWorldDestroys_{};
   std::vector<lr::core::MaterialId> pendingMaterialReleases_{};
   std::unordered_map<std::uint64_t, lr::core::MaterialDesc> materialBases_{};
+  std::unordered_map<std::uint64_t, lr::core::Aabb> meshBounds_{};
 
   static std::uint64_t materialKey(lr::core::MaterialId id) noexcept;
+  static std::uint64_t meshKey(lr::core::MeshId id) noexcept;
   void queueReleaseOverrideCopy(entt::entity e);
   void applyRenderableToWorld(lr::scene::World &world, entt::entity e,
                               lr::core::EntityId wid);

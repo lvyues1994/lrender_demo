@@ -1,4 +1,5 @@
 #include "AssetInstall.h"
+#include <lr/core/Mesh.h>
 #include <QCoreApplication>
 #include <QThread>
 #include <cmath>
@@ -14,6 +15,7 @@ struct AssetInstall::Impl {
     std::size_t next = 0;
     std::vector<lr::core::EntityId> entities;
     std::vector<lr::core::MeshId> meshes;
+    std::vector<lr::core::Aabb> meshBounds; // parallel to meshes (local space)
     std::vector<lr::core::MaterialId> materials;
     std::vector<lr::core::MaterialId> partMaterials; // parallel to entities
     std::vector<lr::core::TextureId> textures;
@@ -159,6 +161,7 @@ void AssetInstall::begin(CpuAssetPtr a) {
   b.asset = std::move(a);
   b.entities.reserve(b.asset->parts.size());
   b.meshes.reserve(b.asset->parts.size());
+  b.meshBounds.reserve(b.asset->parts.size());
   b.materials.reserve(b.asset->materials.size());
   b.textures.reserve(b.asset->textures.size());
   b.materialMap.resize(b.asset->materials.size());
@@ -179,6 +182,7 @@ bool AssetInstall::step(std::size_t maxParts) {
       auto material = s.material(p.material);
       auto mesh = s.world.resources().addMesh(p.mesh);
       b.meshes.push_back(mesh);
+      b.meshBounds.push_back(lr::core::boundsOf(*p.mesh));
       auto entity = s.world.createEntity({}, std::nullopt);
       b.entities.push_back(entity);
       b.partMaterials.push_back(material);
@@ -228,6 +232,10 @@ std::vector<lr::core::EntityId> const &AssetInstall::installedEntities() const {
 std::vector<lr::core::MeshId> const &AssetInstall::installedMeshes() const {
   impl_->check();
   return impl_->installed.meshes;
+}
+std::vector<lr::core::Aabb> const &AssetInstall::installedMeshBounds() const {
+  impl_->check();
+  return impl_->installed.meshBounds;
 }
 std::vector<lr::core::MaterialId> const &AssetInstall::installedPartMaterials() const {
   impl_->check();

@@ -1,6 +1,8 @@
 #include "RenderSession.h"
 #include "AssetInstall.h"
 #include "editor/EditorScene.h"
+#include "editor/GizmoMath.h"
+#include "editor/GizmoVisuals.h"
 #include "editor/commands/CommandHistory.h"
 #include "Diagnostics.h"
 #include "FramePump.h"
@@ -84,6 +86,10 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   std::unique_ptr<AssetInstall> installer;
   editor::EditorScene editor;
   editor::CommandHistory history;
+  editor::GizmoVisuals gizmoVisuals;
+  EditorEntityId gizmoPrimary_{};
+  editor::GizmoMode gizmoMode_ = editor::GizmoMode::Translate;
+  editor::GizmoSpace gizmoSpace_ = editor::GizmoSpace::Local;
   std::uint64_t editMergeEpoch_ = 0;
   std::map<AssetRequestId, LoadTicket> loads;
   std::optional<AssetEntry> pendingLoad;
@@ -617,7 +623,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
 
       if (auto const *mat = editor.registry().try_get<editor::MaterialRef>(e))
         snap.materialBase = editor.materialBaseOf(mat->id);
-      // E5: world matrix (parent chain) + pick AABB (unit cube in local, transformed).
+      // E5: world matrix (parent chain) + pick AABB from remembered mesh bounds.
       {
         lr::core::mat4 world{1.f};
         std::optional<entt::entity> walk = e;
@@ -634,8 +640,10 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
         for (auto it = chain.rbegin(); it != chain.rend(); ++it)
           world = world * lr::core::matrixOf(*it);
         snap.worldMatrix = world;
-        lr::core::Aabb local{{-0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}};
-        snap.worldBounds = lr::core::transformed(local, world);
+        if (auto const *mesh = editor.registry().try_get<editor::MeshRef>(e)) {
+          if (auto localBounds = editor.meshBoundsOf(mesh->id))
+            snap.worldBounds = lr::core::transformed(*localBounds, world);
+        }
       }
       value.entities.push_back(std::move(snap));
     }
@@ -643,6 +651,42 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
 
   // N3: do NOT clear the editor at install start — keep old model editable/visible
   // until commit succeeds. Only roll back an in-flight staging transaction.
+  void syncGizmoVisualsIntoWorld() {
+    if (!resources.world)
+      return;
+    if (!gizmoPrimary_.isValid()) {
+      gizmoVisuals.clear(*resources.world);
+      return;
+    }
+    lr::core::mat4 world{1.f};
+    bool found = false;
+    for (auto e : editor.registry().view<editor::Name, editor::LocalTransform, editor::Hierarchy>()) {
+      EditorEntityId id{static_cast<std::uint32_t>(entt::to_integral(e))};
+      if (id != gizmoPrimary_)
+        continue;
+      // Recompute world matrix (same as publish).
+      std::optional<entt::entity> walk = e;
+      std::vector<lr::core::Transform> chain;
+      while (walk && editor.registry().valid(*walk)) {
+        if (auto const *lt = editor.registry().try_get<editor::LocalTransform>(*walk))
+          chain.push_back(lt->value);
+        else
+          chain.push_back(lr::core::Transform::identity());
+        auto const *h = editor.registry().try_get<editor::Hierarchy>(*walk);
+        walk = h ? h->parent : std::nullopt;
+      }
+      for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+        world = world * lr::core::matrixOf(*it);
+      found = true;
+      break;
+    }
+    if (!found) {
+      gizmoVisuals.clear(*resources.world);
+      return;
+    }
+    gizmoVisuals.sync(*resources.world, world, gizmoMode_, gizmoSpace_);
+  }
+
   void prepareEditorForInstall() {
     if (installer && installer->active())
       installer->rollback();
@@ -670,6 +714,14 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     // C1: remember install-time MaterialDesc (textures) keyed by original MaterialId.
     for (auto const &entry : installer->installedMaterialEntries())
       editor.rememberMaterialBase(entry.id, entry.desc);
+    {
+      auto const &mids = installer->installedMeshes();
+      auto const &bounds = installer->installedMeshBounds();
+      if (mids.size() != bounds.size())
+        throw std::logic_error("AssetInstall mesh/bounds size mismatch");
+      for (std::size_t i = 0; i < mids.size(); ++i)
+        editor.rememberMeshBounds(mids[i], bounds[i]);
+    }
   }
 
   void adoptInstalledIntoEditor() {
@@ -821,6 +873,13 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
         // Push editor dirty TRS/hierarchy/mesh-mat into World before extract.
         // C1: do not catch here — outer catch completes/erases the reserved stamp.
         editor.syncToWorld(*resources.world);
+        syncGizmoVisualsIntoWorld();
+        pending = resources.world->extractDelta();
+        ++performance.deltaExtractions;
+      } else if (gizmoPrimary_.isValid()) {
+        // Cached delta would omit gizmo TRS updates; refresh when a selection gizmo is live.
+        editor.syncToWorld(*resources.world);
+        syncGizmoVisualsIntoWorld();
         pending = resources.world->extractDelta();
         ++performance.deltaExtractions;
       }
@@ -1095,6 +1154,9 @@ void RenderSession::start() {
 void RenderSession::selectModel(ModelId id) {
   auto &s = *impl_;
   s.owner();
+  s.gizmoPrimary_ = {};
+  if (s.resources.world)
+    s.gizmoVisuals.clear(*s.resources.world);
   if (s.blocked())
     return;
   try {
@@ -1141,6 +1203,14 @@ void RenderSession::setNormalMapping(bool enabled) {
 
     for (auto const &entry : s.installer->installedMaterialEntries())
       s.editor.rememberMaterialBase(entry.id, entry.desc);
+    {
+      auto const &mids = s.installer->installedMeshes();
+      auto const &bounds = s.installer->installedMeshBounds();
+      if (mids.size() != bounds.size())
+        throw std::logic_error("AssetInstall mesh/bounds size mismatch");
+      for (std::size_t i = 0; i < mids.size(); ++i)
+        s.editor.rememberMeshBounds(mids[i], bounds[i]);
+    }
     s.normalMapping = enabled;
     s.sceneParametersChanged();
   } catch (std::exception const &e) {
@@ -1174,6 +1244,14 @@ void RenderSession::setRoughness(float roughness) {
 
     for (auto const &entry : s.installer->installedMaterialEntries())
       s.editor.rememberMaterialBase(entry.id, entry.desc);
+    {
+      auto const &mids = s.installer->installedMeshes();
+      auto const &bounds = s.installer->installedMeshBounds();
+      if (mids.size() != bounds.size())
+        throw std::logic_error("AssetInstall mesh/bounds size mismatch");
+      for (std::size_t i = 0; i < mids.size(); ++i)
+        s.editor.rememberMeshBounds(mids[i], bounds[i]);
+    }
     s.roughness = roughness;
     s.sceneParametersChanged();
   } catch (std::exception const &e) {
@@ -1489,5 +1567,33 @@ void RenderSession::endEditMerge() {
   s.history.endMerge(s.editMergeEpoch_);
   s.editMergeEpoch_ = 0;
 }
+
+void RenderSession::setGizmoVisuals(EditorEntityId primary, std::uint32_t mode, std::uint32_t space) {
+  auto &s = *impl_;
+  s.owner();
+  s.gizmoPrimary_ = primary;
+  s.gizmoMode_ = static_cast<editor::GizmoMode>(mode);
+  s.gizmoSpace_ = static_cast<editor::GizmoSpace>(space);
+  // Gizmo World entities change outside the cached pending delta — force re-extract.
+  s.pending.reset();
+  s.pump.markDirty();
+  s.queueTick();
+}
+
+void RenderSession::clearGizmoVisuals() {
+  auto &s = *impl_;
+  s.owner();
+  s.gizmoPrimary_ = {};
+  if (s.resources.world)
+    s.gizmoVisuals.clear(*s.resources.world);
+  s.pending.reset();
+  s.pump.markDirty();
+  s.queueTick();
+}
+
+std::size_t RenderSession::gizmoVisualEntityCount() const noexcept {
+  return impl_->gizmoVisuals.entityCount();
+}
+
 
 } // namespace demo

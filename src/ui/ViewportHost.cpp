@@ -3,6 +3,7 @@
 #include <lr/core/Primitives.h>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QtGui/QPolygonF>
 #include <QTimer>
 #include <QWheelEvent>
 #include <QWindow>
@@ -12,6 +13,7 @@ namespace demo {
 namespace {
 constexpr int kClickSlop = 4;
 constexpr float kHandleLen = 1.25f;
+constexpr float kRingRadius = 1.0f;
 constexpr float kHandlePixels = 14.f;
 
 editor::GizmoAxis axisFromIndex(int i) {
@@ -39,19 +41,27 @@ void ViewportHost::showSnapshot(SessionSnapshotPtr snap,
                                 editor::SelectionState const &selection) {
   snap_ = std::move(snap);
   primary_ = selection.primary().value_or(EditorEntityId{});
+  notifyGizmoVisuals();
   // Session blocked/Failed: cancel in-progress gizmo merge safely.
   if (snap_ && (snap_->life == LifeState::Failed || snap_->life == LifeState::Stopping ||
                 snap_->life == LifeState::Stopped))
     cancelGizmoDrag();
   update();
-  syncSharedOverlayGeometry();
+}
+void ViewportHost::notifyGizmoVisuals() {
+  if (!commands_.syncGizmoVisuals)
+    return;
+  commands_.syncGizmoVisuals(primary_, static_cast<std::uint32_t>(gizmoMode_),
+                             static_cast<std::uint32_t>(gizmoSpace_));
 }
 void ViewportHost::setGizmoMode(editor::GizmoMode mode) {
   gizmoMode_ = mode;
+  notifyGizmoVisuals();
   update();
 }
 void ViewportHost::setGizmoSpace(editor::GizmoSpace space) {
   gizmoSpace_ = space;
+  notifyGizmoVisuals();
   update();
 }
 void ViewportHost::wheelSteps(double steps) {
@@ -98,6 +108,8 @@ lr::core::vec3 ViewportHost::axisDirection(editor::GizmoAxis axis) const {
     local = {0, 1, 0};
   else if (axis == editor::GizmoAxis::Z)
     local = {0, 0, 1};
+  else if (axis == editor::GizmoAxis::Screen || axis == editor::GizmoAxis::None)
+    return {1, 0, 0};
   if (gizmoSpace_ == editor::GizmoSpace::World || !snap_ || !primary_.isValid())
     return local;
   for (auto const &e : snap_->entities) {
@@ -115,7 +127,7 @@ lr::core::vec3 ViewportHost::axisDirection(editor::GizmoAxis axis) const {
 }
 
 bool ViewportHost::hitGizmo(QPoint const &pos, editor::GizmoAxis *outAxis) const {
-  if (!primary_.isValid() || !snap_ || gizmoMode_ != editor::GizmoMode::Translate)
+  if (!primary_.isValid() || !snap_)
     return false;
   lr::core::vec3 origin{};
   bool found = false;
@@ -135,14 +147,36 @@ bool ViewportHost::hitGizmo(QPoint const &pos, editor::GizmoAxis *outAxis) const
   for (int i = 0; i < 3; ++i) {
     auto ax = axisFromIndex(i);
     auto dir = axisDirection(ax);
-    auto hit = editor::hitTranslateHandle(ray, origin, dir, kHandleLen, camera_.camera, ext,
-                                          kHandlePixels);
+    editor::GizmoHandleHit hit{};
+    if (gizmoMode_ == editor::GizmoMode::Translate)
+      hit = editor::hitTranslateHandle(ray, origin, dir, kHandleLen, camera_.camera, ext,
+                                       kHandlePixels);
+    else if (gizmoMode_ == editor::GizmoMode::Rotate)
+      hit = editor::hitRotateHandle(ray, origin, dir, kRingRadius, camera_.camera, ext,
+                                    kHandlePixels);
+    else
+      hit = editor::hitScaleHandle(ray, origin, dir, kHandleLen, camera_.camera, ext,
+                                   kHandlePixels);
     if (hit.axis == editor::GizmoAxis::None)
       continue;
     if (hit.t < best) {
       best = hit.t;
       bestAxis = ax;
     }
+  }
+  // Uniform scale: small center handle.
+  if (gizmoMode_ == editor::GizmoMode::Scale) {
+    auto center = editor::hitTranslateHandle(ray, origin, {1, 0, 0}, 0.35f, camera_.camera, ext,
+                                             kHandlePixels * 1.2f);
+    // Prefer a dedicated screen-axis if ray is close to origin in pixels.
+    auto op = editor::projectToPixel(camera_.camera, ext, origin);
+    if (op) {
+      float dx = float(pos.x()) - op->x, dy = float(pos.y()) - op->y;
+      if (std::sqrt(dx * dx + dy * dy) <= kHandlePixels) {
+        bestAxis = editor::GizmoAxis::Screen;
+      }
+    }
+    (void)center;
   }
   if (bestAxis == editor::GizmoAxis::None)
     return false;
@@ -187,6 +221,8 @@ void ViewportHost::mousePressEvent(QMouseEvent *e) {
     if (hitGizmo(e->pos(), &axis)) {
       gizmoDragging_ = true;
       dragAxis_ = axis;
+      dragUniform_ = (axis == editor::GizmoAxis::Screen) ||
+                     (gizmoMode_ == editor::GizmoMode::Scale && axis == editor::GizmoAxis::Screen);
       auto ext = currentExtent();
       pressRay_ = editor::cameraRay(camera_.camera, ext, float(e->pos().x()), float(e->pos().y()));
       dragAxisDir_ = axisDirection(axis);
@@ -217,11 +253,21 @@ void ViewportHost::mouseMoveEvent(QMouseEvent *e) {
       return;
     auto ext = currentExtent();
     auto ray1 = editor::cameraRay(camera_.camera, ext, float(e->pos().x()), float(e->pos().y()));
-    auto worldDelta =
-        editor::translateDeltaAlongAxis(pressRay_, ray1, dragOrigin_, dragAxisDir_);
-    auto next = editor::applyWorldTranslationDelta(dragLocal0_, dragParentWorld_, worldDelta);
+    lr::core::Transform next = dragLocal0_;
+    if (gizmoMode_ == editor::GizmoMode::Translate) {
+      auto worldDelta =
+          editor::translateDeltaAlongAxis(pressRay_, ray1, dragOrigin_, dragAxisDir_);
+      next = editor::applyWorldTranslationDelta(dragLocal0_, dragParentWorld_, worldDelta);
+    } else if (gizmoMode_ == editor::GizmoMode::Rotate) {
+      auto ang = editor::rotateAngleAroundAxis(pressRay_, ray1, dragOrigin_, dragAxisDir_);
+      if (ang)
+        next = editor::applyWorldRotationDelta(dragLocal0_, dragParentWorld_, dragAxisDir_, *ang);
+    } else {
+      auto axis = dragUniform_ ? lr::core::vec3{1, 0, 0} : dragAxisDir_;
+      float factor = editor::scaleFactorAlongAxis(pressRay_, ray1, dragOrigin_, axis);
+      next = editor::applyScaleDelta(dragLocal0_, dragParentWorld_, axis, factor, dragUniform_);
+    }
     commands_.setEntityTransform(primary_, next);
-    // Keep pressRay_ as start; deltas are absolute from press — good for coalescing.
     update();
     return;
   }
@@ -287,14 +333,39 @@ void ViewportHost::paintGizmo(QPainter &p) {
   for (int i = 0; i < 3; ++i) {
     auto ax = axisFromIndex(i);
     auto dir = axisDirection(ax);
-    auto tip = editor::projectToPixel(camera_.camera, ext, origin + dir * kHandleLen);
-    if (!tip)
-      continue;
     QPen pen(colors[i], dragAxis_ == ax ? 3.0 : 2.0);
     p.setPen(pen);
-    p.drawLine(QPointF(o->x, o->y), QPointF(tip->x, tip->y));
     p.setBrush(colors[i]);
-    p.drawEllipse(QPointF(tip->x, tip->y), 4, 4);
+    if (gizmoMode_ == editor::GizmoMode::Rotate) {
+      // Approximate ring as 32-segment polyline in the plane ⊥ axis.
+      lr::core::vec3 a = std::fabs(dir.y) < 0.9f ? tc::cross(dir, {0, 1, 0})
+                                                 : tc::cross(dir, {1, 0, 0});
+      a = tc::normalize(a);
+      lr::core::vec3 b = tc::normalize(tc::cross(dir, a));
+      QPolygonF poly;
+      for (int s = 0; s <= 32; ++s) {
+        float ang = float(s) / 32.f * 6.2831853f;
+        auto pt = origin + (a * std::cos(ang) + b * std::sin(ang)) * kRingRadius;
+        if (auto pix = editor::projectToPixel(camera_.camera, ext, pt))
+          poly << QPointF(pix->x, pix->y);
+      }
+      if (poly.size() > 1)
+        p.drawPolyline(poly);
+    } else {
+      auto tip = editor::projectToPixel(camera_.camera, ext, origin + dir * kHandleLen);
+      if (!tip)
+        continue;
+      p.drawLine(QPointF(o->x, o->y), QPointF(tip->x, tip->y));
+      if (gizmoMode_ == editor::GizmoMode::Scale)
+        p.drawRect(QRectF(tip->x - 4, tip->y - 4, 8, 8));
+      else
+        p.drawEllipse(QPointF(tip->x, tip->y), 4, 4);
+    }
+  }
+  if (gizmoMode_ == editor::GizmoMode::Scale) {
+    p.setPen(QPen(QColor(230, 230, 80), 2.0));
+    p.setBrush(QColor(230, 230, 80));
+    p.drawEllipse(QPointF(o->x, o->y), 5, 5);
   }
 }
 
@@ -303,38 +374,12 @@ void ViewportHost::paintEvent(QPaintEvent *) {
   p.fillRect(rect(), QColor(24, 25, 30));
   if (!image_.isNull())
     p.drawImage(rect(), image_);
-  // Readback path: paint gizmo on top of the image. Shared path uses overlay.
+  // Readback HUD. Shared path draws gizmos as World meshes (see RenderSession).
   if (!native_)
     paintGizmo(p);
 }
 
-void ViewportHost::ensureSharedOverlay() {
-  if (sharedOverlay_)
-    return;
-  // Display-only: native Vulkan child covers in-parent Qt siblings; interaction
-  // stays on ViewportHost via the native window eventFilter.
-  sharedOverlay_ = new QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowDoesNotAcceptFocus);
-  sharedOverlay_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-  sharedOverlay_->setAttribute(Qt::WA_TranslucentBackground, true);
-  sharedOverlay_->setAttribute(Qt::WA_ShowWithoutActivating, true);
-  sharedOverlay_->setStyleSheet(QStringLiteral("background: transparent;"));
-  // Paint via event filter on overlay
-  sharedOverlay_->installEventFilter(this);
-}
 
-void ViewportHost::syncSharedOverlayGeometry() {
-  if (!native_) {
-    if (sharedOverlay_)
-      sharedOverlay_->hide();
-    return;
-  }
-  ensureSharedOverlay();
-  auto tl = mapToGlobal(QPoint(0, 0));
-  sharedOverlay_->setGeometry(QRect(tl, size()));
-  if (isVisible())
-    sharedOverlay_->show();
-  sharedOverlay_->update();
-}
 
 void ViewportHost::notifyExtent() {
   auto d = devicePixelRatioF();
@@ -349,7 +394,6 @@ void ViewportHost::notifyExtent() {
   commands_.viewport({{width(), height()}, physical, d},
                      isVisible() && width() > 0 && height() > 0 &&
                          physical.x > 0 && physical.y > 0);
-  syncSharedOverlayGeometry();
 }
 void ViewportHost::resizeEvent(QResizeEvent *) {
   if (native_)
@@ -357,16 +401,8 @@ void ViewportHost::resizeEvent(QResizeEvent *) {
   notifyExtent();
 }
 void ViewportHost::showEvent(QShowEvent *) { notifyExtent(); }
-void ViewportHost::hideEvent(QHideEvent *) {
-  notifyExtent();
-  if (sharedOverlay_)
-    sharedOverlay_->hide();
-}
-ViewportHost::~ViewportHost() {
-  cancelGizmoDrag();
-  delete sharedOverlay_;
-  sharedOverlay_ = nullptr;
-}
+void ViewportHost::hideEvent(QHideEvent *) { notifyExtent(); }
+ViewportHost::~ViewportHost() { cancelGizmoDrag(); }
 std::shared_ptr<NativeHostLease> ViewportHost::createNativeLease() {
   if (native_)
     retireNative();
@@ -381,7 +417,6 @@ std::shared_ptr<NativeHostLease> ViewportHost::createNativeLease() {
                              "Platform: native surface lost",
                              "retire old lease before reconstruction"});
   });
-  syncSharedOverlayGeometry();
   return lease;
 }
 void ViewportHost::retireNative() {
@@ -395,16 +430,9 @@ void ViewportHost::retireNative() {
   native_->releaseHost();
   native_.reset();
   nativeWasExposed_ = false;
-  if (sharedOverlay_)
-    sharedOverlay_->hide();
   update();
 }
 bool ViewportHost::eventFilter(QObject *object, QEvent *event) {
-  if (sharedOverlay_ && object == sharedOverlay_ && event->type() == QEvent::Paint) {
-    QPainter p(sharedOverlay_);
-    paintGizmo(p);
-    return true;
-  }
   if (native_ && object == native_->nativeWindow()) {
     if (event->type() == QEvent::MouseButtonPress) {
       mousePressEvent(static_cast<QMouseEvent *>(event));
@@ -434,8 +462,7 @@ bool ViewportHost::eventFilter(QObject *object, QEvent *event) {
             exposed && isVisible() && width() > 0 && height() > 0 &&
                 pixels.width() > 0 && pixels.height() > 0);
       }
-      syncSharedOverlayGeometry();
-    }
+        }
   }
   return QWidget::eventFilter(object, event);
 }

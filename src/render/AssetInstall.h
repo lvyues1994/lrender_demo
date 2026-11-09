@@ -27,6 +27,7 @@ public:
   // Installed World handles after commit (empty while staging / after clear).
   std::vector<lr::core::EntityId> const &installedEntities() const;
   std::vector<lr::core::MeshId> const &installedMeshes() const;
+  std::vector<lr::core::Aabb> const &installedMeshBounds() const;
   std::vector<lr::core::MaterialId> const &installedPartMaterials() const;
   // Original MaterialId + desc as last written to World (textures included).
   struct MaterialEntry {

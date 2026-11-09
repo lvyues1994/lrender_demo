@@ -6,6 +6,8 @@
 #include <QKeySequence>
 #include <QMenu>
 #include <QMenuBar>
+#include <QToolBar>
+#include <QActionGroup>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -233,6 +235,59 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
       refreshEditActions();
     });
     refreshEditActions();
+  }
+  // E5: Translate / Rotate / Scale + Local / World (toolbar + W/E/R).
+  {
+    auto *tb = addToolBar(tr("Gizmo"));
+    tb->setObjectName("gizmoToolbar");
+    auto *modeGroup = new QActionGroup(this);
+    modeGroup->setExclusive(true);
+    gizmoTranslateAction_ = tb->addAction(tr("Translate"));
+    gizmoTranslateAction_->setObjectName("gizmoTranslate");
+    gizmoTranslateAction_->setCheckable(true);
+    gizmoTranslateAction_->setChecked(true);
+    gizmoTranslateAction_->setShortcut(QKeySequence(tr("W")));
+    gizmoTranslateAction_->setShortcutContext(Qt::WindowShortcut);
+    modeGroup->addAction(gizmoTranslateAction_);
+    gizmoRotateAction_ = tb->addAction(tr("Rotate"));
+    gizmoRotateAction_->setObjectName("gizmoRotate");
+    gizmoRotateAction_->setCheckable(true);
+    gizmoRotateAction_->setShortcut(QKeySequence(tr("E")));
+    gizmoRotateAction_->setShortcutContext(Qt::WindowShortcut);
+    modeGroup->addAction(gizmoRotateAction_);
+    gizmoScaleAction_ = tb->addAction(tr("Scale"));
+    gizmoScaleAction_->setObjectName("gizmoScale");
+    gizmoScaleAction_->setCheckable(true);
+    gizmoScaleAction_->setShortcut(QKeySequence(tr("R")));
+    gizmoScaleAction_->setShortcutContext(Qt::WindowShortcut);
+    modeGroup->addAction(gizmoScaleAction_);
+    tb->addSeparator();
+    auto *spaceGroup = new QActionGroup(this);
+    spaceGroup->setExclusive(true);
+    gizmoLocalAction_ = tb->addAction(tr("Local"));
+    gizmoLocalAction_->setObjectName("gizmoLocal");
+    gizmoLocalAction_->setCheckable(true);
+    gizmoLocalAction_->setChecked(true);
+    spaceGroup->addAction(gizmoLocalAction_);
+    gizmoWorldAction_ = tb->addAction(tr("World"));
+    gizmoWorldAction_->setObjectName("gizmoWorld");
+    gizmoWorldAction_->setCheckable(true);
+    spaceGroup->addAction(gizmoWorldAction_);
+    connect(gizmoTranslateAction_, &QAction::triggered, this, [this] {
+      viewport_->setGizmoMode(editor::GizmoMode::Translate);
+    });
+    connect(gizmoRotateAction_, &QAction::triggered, this, [this] {
+      viewport_->setGizmoMode(editor::GizmoMode::Rotate);
+    });
+    connect(gizmoScaleAction_, &QAction::triggered, this, [this] {
+      viewport_->setGizmoMode(editor::GizmoMode::Scale);
+    });
+    connect(gizmoLocalAction_, &QAction::triggered, this, [this] {
+      viewport_->setGizmoSpace(editor::GizmoSpace::Local);
+    });
+    connect(gizmoWorldAction_, &QAction::triggered, this, [this] {
+      viewport_->setGizmoSpace(editor::GizmoSpace::World);
+    });
   }
   connect(model_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
           [this](int) {
