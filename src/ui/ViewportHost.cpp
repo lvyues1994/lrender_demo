@@ -1,6 +1,6 @@
 #include "ViewportHost.h"
-#include <lr/core/Primitives.h>
 #include "presentation/ReadbackAdapter.h"
+#include <lr/core/Primitives.h>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QTimer>
@@ -9,12 +9,51 @@
 #include <algorithm>
 #include <cmath>
 namespace demo {
+namespace {
+constexpr int kClickSlop = 4;
+constexpr float kHandleLen = 1.25f;
+constexpr float kHandlePixels = 14.f;
+
+editor::GizmoAxis axisFromIndex(int i) {
+  switch (i) {
+  case 0:
+    return editor::GizmoAxis::X;
+  case 1:
+    return editor::GizmoAxis::Y;
+  case 2:
+    return editor::GizmoAxis::Z;
+  default:
+    return editor::GizmoAxis::None;
+  }
+}
+} // namespace
+
 ViewportHost::ViewportHost(UiCommands c, QWidget *p)
     : QWidget(p), commands_(std::move(c)) {
   setMinimumSize(1, 1);
   setFocusPolicy(Qt::StrongFocus);
+  setMouseTracking(true);
 }
-void ViewportHost::showCamera(CameraState c) { camera_ = c; }
+void ViewportHost::showCamera(CameraState c) { camera_ = c; update(); }
+void ViewportHost::showSnapshot(SessionSnapshotPtr snap,
+                                editor::SelectionState const &selection) {
+  snap_ = std::move(snap);
+  primary_ = selection.primary().value_or(EditorEntityId{});
+  // Session blocked/Failed: cancel in-progress gizmo merge safely.
+  if (snap_ && (snap_->life == LifeState::Failed || snap_->life == LifeState::Stopping ||
+                snap_->life == LifeState::Stopped))
+    cancelGizmoDrag();
+  update();
+  syncSharedOverlayGeometry();
+}
+void ViewportHost::setGizmoMode(editor::GizmoMode mode) {
+  gizmoMode_ = mode;
+  update();
+}
+void ViewportHost::setGizmoSpace(editor::GizmoSpace space) {
+  gizmoSpace_ = space;
+  update();
+}
 void ViewportHost::wheelSteps(double steps) {
   auto &c = camera_.camera;
   auto d = c.position - c.target;
@@ -41,18 +80,164 @@ void ViewportHost::showFrame(OwnedFrame f) {
   update();
 }
 QImage ViewportHost::readbackImage() const { return image_; }
-void ViewportHost::mousePressEvent(QMouseEvent *e) { drag_ = e->pos(); }
-void ViewportHost::mouseMoveEvent(QMouseEvent *e) {
-  if (!(e->buttons() & Qt::LeftButton))
+
+ViewportExtent ViewportHost::currentExtent() const {
+  auto d = devicePixelRatioF();
+  lr::core::ivec2 physical{qRound(width() * d), qRound(height() * d)};
+  if (native_) {
+    auto pixels = native_->physicalExtent();
+    if (pixels.width() > 0 && pixels.height() > 0)
+      physical = {pixels.width(), pixels.height()};
+  }
+  return {{width(), height()}, physical, d};
+}
+
+lr::core::vec3 ViewportHost::axisDirection(editor::GizmoAxis axis) const {
+  lr::core::vec3 local{1, 0, 0};
+  if (axis == editor::GizmoAxis::Y)
+    local = {0, 1, 0};
+  else if (axis == editor::GizmoAxis::Z)
+    local = {0, 0, 1};
+  if (gizmoSpace_ == editor::GizmoSpace::World || !snap_ || !primary_.isValid())
+    return local;
+  for (auto const &e : snap_->entities) {
+    if (e.id != primary_)
+      continue;
+    // Local axes from worldMatrix basis vectors.
+    auto const &m = e.worldMatrix;
+    if (axis == editor::GizmoAxis::X)
+      return tc::normalize(lr::core::vec3{m[0][0], m[0][1], m[0][2]});
+    if (axis == editor::GizmoAxis::Y)
+      return tc::normalize(lr::core::vec3{m[1][0], m[1][1], m[1][2]});
+    return tc::normalize(lr::core::vec3{m[2][0], m[2][1], m[2][2]});
+  }
+  return local;
+}
+
+bool ViewportHost::hitGizmo(QPoint const &pos, editor::GizmoAxis *outAxis) const {
+  if (!primary_.isValid() || !snap_ || gizmoMode_ != editor::GizmoMode::Translate)
+    return false;
+  lr::core::vec3 origin{};
+  bool found = false;
+  for (auto const &e : snap_->entities) {
+    if (e.id != primary_)
+      continue;
+    origin = {e.worldMatrix[3][0], e.worldMatrix[3][1], e.worldMatrix[3][2]};
+    found = true;
+    break;
+  }
+  if (!found)
+    return false;
+  auto ext = currentExtent();
+  auto ray = editor::cameraRay(camera_.camera, ext, float(pos.x()), float(pos.y()));
+  float best = 1e9f;
+  editor::GizmoAxis bestAxis = editor::GizmoAxis::None;
+  for (int i = 0; i < 3; ++i) {
+    auto ax = axisFromIndex(i);
+    auto dir = axisDirection(ax);
+    auto hit = editor::hitTranslateHandle(ray, origin, dir, kHandleLen, camera_.camera, ext,
+                                          kHandlePixels);
+    if (hit.axis == editor::GizmoAxis::None)
+      continue;
+    if (hit.t < best) {
+      best = hit.t;
+      bestAxis = ax;
+    }
+  }
+  if (bestAxis == editor::GizmoAxis::None)
+    return false;
+  if (outAxis)
+    *outAxis = bestAxis;
+  return true;
+}
+
+void ViewportHost::pickAt(QPoint const &pos) {
+  if (!onPick_ || !snap_)
     return;
-  auto delta = e->pos() - drag_;
+  auto ext = currentExtent();
+  auto ray = editor::cameraRay(camera_.camera, ext, float(pos.x()), float(pos.y()));
+  std::vector<std::pair<EditorEntityId, lr::core::Aabb>> boxes;
+  boxes.reserve(snap_->entities.size());
+  for (auto const &e : snap_->entities) {
+    if (!e.worldBounds)
+      continue;
+    boxes.emplace_back(e.id, *e.worldBounds);
+  }
+  auto hit = editor::pickClosest(ray, boxes);
+  onPick_(hit ? hit->id : EditorEntityId{});
+}
+
+void ViewportHost::cancelGizmoDrag() {
+  if (mergeOpen_ && commands_.endEditMerge) {
+    commands_.endEditMerge();
+    mergeOpen_ = false;
+  }
+  gizmoDragging_ = false;
+  dragAxis_ = editor::GizmoAxis::None;
+}
+
+void ViewportHost::mousePressEvent(QMouseEvent *e) {
+  pressPos_ = e->pos();
+  drag_ = e->pos();
+  pressing_ = true;
+  orbiting_ = false;
+  gizmoDragging_ = false;
+  if (e->button() == Qt::LeftButton) {
+    editor::GizmoAxis axis = editor::GizmoAxis::None;
+    if (hitGizmo(e->pos(), &axis)) {
+      gizmoDragging_ = true;
+      dragAxis_ = axis;
+      auto ext = currentExtent();
+      pressRay_ = editor::cameraRay(camera_.camera, ext, float(e->pos().x()), float(e->pos().y()));
+      dragAxisDir_ = axisDirection(axis);
+      dragParentWorld_ = lr::core::mat4{1.f};
+      for (auto const &ent : snap_ ? snap_->entities
+                                   : std::vector<EditorEntitySnapshot>{}) {
+        if (ent.id != primary_)
+          continue;
+        dragLocal0_ = ent.local;
+        dragOrigin_ = {ent.worldMatrix[3][0], ent.worldMatrix[3][1], ent.worldMatrix[3][2]};
+        // Parent world = world * inv(local)
+        dragParentWorld_ = ent.worldMatrix * tc::inverse(lr::core::matrixOf(ent.local));
+        break;
+      }
+      if (commands_.beginEditMerge) {
+        commands_.beginEditMerge();
+        mergeOpen_ = true;
+      }
+      return;
+    }
+  }
+}
+void ViewportHost::mouseMoveEvent(QMouseEvent *e) {
+  if (!pressing_)
+    return;
+  if (gizmoDragging_) {
+    if (!commands_.setEntityTransform || !primary_.isValid())
+      return;
+    auto ext = currentExtent();
+    auto ray1 = editor::cameraRay(camera_.camera, ext, float(e->pos().x()), float(e->pos().y()));
+    auto worldDelta =
+        editor::translateDeltaAlongAxis(pressRay_, ray1, dragOrigin_, dragAxisDir_);
+    auto next = editor::applyWorldTranslationDelta(dragLocal0_, dragParentWorld_, worldDelta);
+    commands_.setEntityTransform(primary_, next);
+    // Keep pressRay_ as start; deltas are absolute from press — good for coalescing.
+    update();
+    return;
+  }
+  auto delta = e->pos() - pressPos_;
+  if (!orbiting_ && (std::abs(delta.x()) > kClickSlop || std::abs(delta.y()) > kClickSlop))
+    orbiting_ = true;
+  if (!orbiting_ || !(e->buttons() & Qt::LeftButton))
+    return;
+  auto step = e->pos() - drag_;
   drag_ = e->pos();
   auto &c = camera_.camera;
   auto offset = c.position - c.target;
   auto distance = tc::length(offset);
-  auto yaw = std::atan2(offset.x, offset.z) - delta.x() * .01f;
+  auto yaw = std::atan2(offset.x, offset.z) - step.x() * .01f;
   auto pitch = std::clamp(
-      std::asin(std::clamp(offset.y / distance, -1.f, 1.f)) + delta.y() * .01f,
+      std::asin(std::clamp(offset.y / distance, -1.f, 1.f)) + step.y() * .01f,
       -1.55f, 1.55f);
   c.position = c.target + lr::core::vec3{std::sin(yaw) * std::cos(pitch),
                                          std::sin(pitch),
@@ -61,28 +246,110 @@ void ViewportHost::mouseMoveEvent(QMouseEvent *e) {
   if (commands_.camera)
     commands_.camera(camera_);
 }
+void ViewportHost::mouseReleaseEvent(QMouseEvent *e) {
+  if (e->button() != Qt::LeftButton) {
+    pressing_ = false;
+    return;
+  }
+  if (gizmoDragging_) {
+    cancelGizmoDrag();
+    pressing_ = false;
+    return;
+  }
+  if (pressing_ && !orbiting_)
+    pickAt(e->pos());
+  pressing_ = false;
+  orbiting_ = false;
+}
 void ViewportHost::wheelEvent(QWheelEvent *e) {
   wheelSteps(e->angleDelta().y() / 120.);
 }
+
+void ViewportHost::paintGizmo(QPainter &p) {
+  if (!primary_.isValid() || !snap_)
+    return;
+  lr::core::vec3 origin{};
+  bool found = false;
+  for (auto const &e : snap_->entities) {
+    if (e.id != primary_)
+      continue;
+    origin = {e.worldMatrix[3][0], e.worldMatrix[3][1], e.worldMatrix[3][2]};
+    found = true;
+    break;
+  }
+  if (!found)
+    return;
+  auto ext = currentExtent();
+  auto o = editor::projectToPixel(camera_.camera, ext, origin);
+  if (!o)
+    return;
+  QColor colors[3] = {QColor(220, 60, 60), QColor(60, 200, 80), QColor(60, 100, 230)};
+  for (int i = 0; i < 3; ++i) {
+    auto ax = axisFromIndex(i);
+    auto dir = axisDirection(ax);
+    auto tip = editor::projectToPixel(camera_.camera, ext, origin + dir * kHandleLen);
+    if (!tip)
+      continue;
+    QPen pen(colors[i], dragAxis_ == ax ? 3.0 : 2.0);
+    p.setPen(pen);
+    p.drawLine(QPointF(o->x, o->y), QPointF(tip->x, tip->y));
+    p.setBrush(colors[i]);
+    p.drawEllipse(QPointF(tip->x, tip->y), 4, 4);
+  }
+}
+
 void ViewportHost::paintEvent(QPaintEvent *) {
   QPainter p(this);
   p.fillRect(rect(), QColor(24, 25, 30));
   if (!image_.isNull())
     p.drawImage(rect(), image_);
+  // Readback path: paint gizmo on top of the image. Shared path uses overlay.
+  if (!native_)
+    paintGizmo(p);
 }
+
+void ViewportHost::ensureSharedOverlay() {
+  if (sharedOverlay_)
+    return;
+  // Display-only: native Vulkan child covers in-parent Qt siblings; interaction
+  // stays on ViewportHost via the native window eventFilter.
+  sharedOverlay_ = new QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowDoesNotAcceptFocus);
+  sharedOverlay_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+  sharedOverlay_->setAttribute(Qt::WA_TranslucentBackground, true);
+  sharedOverlay_->setAttribute(Qt::WA_ShowWithoutActivating, true);
+  sharedOverlay_->setStyleSheet(QStringLiteral("background: transparent;"));
+  // Paint via event filter on overlay
+  sharedOverlay_->installEventFilter(this);
+}
+
+void ViewportHost::syncSharedOverlayGeometry() {
+  if (!native_) {
+    if (sharedOverlay_)
+      sharedOverlay_->hide();
+    return;
+  }
+  ensureSharedOverlay();
+  auto tl = mapToGlobal(QPoint(0, 0));
+  sharedOverlay_->setGeometry(QRect(tl, size()));
+  if (isVisible())
+    sharedOverlay_->show();
+  sharedOverlay_->update();
+}
+
 void ViewportHost::notifyExtent() {
   auto d = devicePixelRatioF();
   if (!commands_.viewport)
     return;
   lr::core::ivec2 physical{qRound(width() * d), qRound(height() * d)};
   if (native_) {
-    auto pixels = native_->physicalExtent(); // actual XCB pixels when available
+    auto pixels = native_->physicalExtent();
     if (pixels.width() > 0 && pixels.height() > 0)
       physical = {pixels.width(), pixels.height()};
   }
   commands_.viewport({{width(), height()}, physical, d},
                      isVisible() && width() > 0 && height() > 0 &&
                          physical.x > 0 && physical.y > 0);
+  syncSharedOverlayGeometry();
 }
 void ViewportHost::resizeEvent(QResizeEvent *) {
   if (native_)
@@ -90,8 +357,16 @@ void ViewportHost::resizeEvent(QResizeEvent *) {
   notifyExtent();
 }
 void ViewportHost::showEvent(QShowEvent *) { notifyExtent(); }
-void ViewportHost::hideEvent(QHideEvent *) { notifyExtent(); }
-ViewportHost::~ViewportHost() = default;
+void ViewportHost::hideEvent(QHideEvent *) {
+  notifyExtent();
+  if (sharedOverlay_)
+    sharedOverlay_->hide();
+}
+ViewportHost::~ViewportHost() {
+  cancelGizmoDrag();
+  delete sharedOverlay_;
+  sharedOverlay_ = nullptr;
+}
 std::shared_ptr<NativeHostLease> ViewportHost::createNativeLease() {
   if (native_)
     retireNative();
@@ -106,6 +381,7 @@ std::shared_ptr<NativeHostLease> ViewportHost::createNativeLease() {
                              "Platform: native surface lost",
                              "retire old lease before reconstruction"});
   });
+  syncSharedOverlayGeometry();
   return lease;
 }
 void ViewportHost::retireNative() {
@@ -119,9 +395,16 @@ void ViewportHost::retireNative() {
   native_->releaseHost();
   native_.reset();
   nativeWasExposed_ = false;
+  if (sharedOverlay_)
+    sharedOverlay_->hide();
   update();
 }
 bool ViewportHost::eventFilter(QObject *object, QEvent *event) {
+  if (sharedOverlay_ && object == sharedOverlay_ && event->type() == QEvent::Paint) {
+    QPainter p(sharedOverlay_);
+    paintGizmo(p);
+    return true;
+  }
   if (native_ && object == native_->nativeWindow()) {
     if (event->type() == QEvent::MouseButtonPress) {
       mousePressEvent(static_cast<QMouseEvent *>(event));
@@ -129,6 +412,10 @@ bool ViewportHost::eventFilter(QObject *object, QEvent *event) {
     }
     if (event->type() == QEvent::MouseMove) {
       mouseMoveEvent(static_cast<QMouseEvent *>(event));
+      return true;
+    }
+    if (event->type() == QEvent::MouseButtonRelease) {
+      mouseReleaseEvent(static_cast<QMouseEvent *>(event));
       return true;
     }
     if (event->type() == QEvent::Wheel) {
@@ -147,6 +434,7 @@ bool ViewportHost::eventFilter(QObject *object, QEvent *event) {
             exposed && isVisible() && width() > 0 && height() > 0 &&
                 pixels.width() > 0 && pixels.height() > 0);
       }
+      syncSharedOverlayGeometry();
     }
   }
   return QWidget::eventFilter(object, event);

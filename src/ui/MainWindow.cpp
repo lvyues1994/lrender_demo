@@ -130,6 +130,8 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
       commands_.selectEntity(id);
     if (properties_ && lastSnapshot_)
       properties_->showSnapshot(lastSnapshot_, selection_);
+    if (viewport_ && lastSnapshot_)
+      viewport_->showSnapshot(lastSnapshot_, selection_);
   };
   hcmd.reparent = [this](EditorEntityId child, std::optional<EditorEntityId> parent) {
     if (!commands_.setEntityParent)
@@ -191,6 +193,17 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
       status_->setText(msg);
   };
   properties_ = new PropertyPanel(std::move(pcmd), this);
+  viewport_->setPickHandler([this](EditorEntityId id) {
+    selection_.setPrimary(id);
+    if (commands_.selectEntity)
+      commands_.selectEntity(id);
+    if (hierarchy_ && lastSnapshot_)
+      hierarchy_->showSnapshot(lastSnapshot_, selection_);
+    if (properties_ && lastSnapshot_)
+      properties_->showSnapshot(lastSnapshot_, selection_);
+    if (viewport_ && lastSnapshot_)
+      viewport_->showSnapshot(lastSnapshot_, selection_);
+  });
   auto *pDock = new QDockWidget(QStringLiteral("Properties"), this);
   pDock->setObjectName("propertiesDock");
   pDock->setWidget(properties_);
@@ -267,6 +280,8 @@ void MainWindow::showSnapshot(SessionSnapshotPtr s) {
     hierarchy_->showSnapshot(s, selection_);
   if (properties_)
     properties_->showSnapshot(s, selection_);
+  if (viewport_)
+    viewport_->showSnapshot(s, selection_);
   restoreAppearance();
   refreshEditActions();
   QSignalBlocker a(model_), b(pipeline_), c(exposure_), d(taa_);

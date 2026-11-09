@@ -1900,3 +1900,47 @@ TEST_CASE("asset_async/readopt-preserves-edited-part-mesh-after-fail") {
   session.requestStop();
   REQUIRE(test::until([&] { return h.stopped; }));
 }
+
+TEST_CASE("session/material-desc-seeds-textures-from-base-when-factors-only") {
+  // E4-minor: setEntityMaterialDesc with factors-only must keep install-time textures
+  // (RenderSession seeds from materialBaseOf). Mutation: delete base seed block → FAIL.
+  App app;
+  auto r = resources(app);
+  Harness h;
+  RenderSession session(
+      std::move(r.runtime), std::move(r.renderer), std::move(r.world),
+      std::make_unique<ReadbackAdapter>(h.presentation()), h.fake(), h.events());
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"floor"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel &&
+           session.snapshot()->installedModel->value == "floor";
+  }));
+  auto snap0 = session.snapshot();
+  REQUIRE_FALSE(snap0->entities.empty());
+  auto id = snap0->entities.front().id;
+  std::optional<lr::core::TextureId> baseColor;
+  for (auto const &e : snap0->entities) {
+    if (e.id == id && e.materialBase && e.materialBase->baseColorTexture)
+      baseColor = e.materialBase->baseColorTexture;
+  }
+  REQUIRE(baseColor.has_value());
+  lr::core::MaterialDesc factorsOnly{};
+  factorsOnly.roughness = 0.31f;
+  factorsOnly.metallic = 0.07f;
+  session.setEntityMaterialDesc(id, factorsOnly);
+  auto snap1 = session.snapshot();
+  bool found = false;
+  for (auto const &e : snap1->entities) {
+    if (e.id != id)
+      continue;
+    REQUIRE(e.materialOverride);
+    CHECK(e.materialOverride->roughness == doctest::Approx(0.31f));
+    REQUIRE(e.materialOverride->baseColorTexture.has_value());
+    CHECK(e.materialOverride->baseColorTexture == baseColor);
+    found = true;
+  }
+  REQUIRE(found);
+  stop(session, h);
+}

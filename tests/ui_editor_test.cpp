@@ -567,3 +567,33 @@ TEST_CASE("ui_editor/property-panel-no-refill-mutation-guard") {
   QCoreApplication::processEvents();
   CHECK(tx->value() == doctest::Approx(9.0));
 }
+
+TEST_CASE("ui_editor/property-panel-drops-stale-snapshot-after-optimistic") {
+  // E4-minor: after local optimistic edit, an older editorSequence snap must not clobber.
+  REQUIRE(QApplication::instance());
+  int transforms = 0;
+  demo::PropertyCommands cmd;
+  cmd.setTransform = [&](EditorEntityId, lr::core::Transform) { ++transforms; };
+  demo::PropertyPanel panel(cmd);
+  SelectionState sel;
+  EditorEntityId id{1};
+  sel.setPrimary(id);
+  auto make = [&](float x, std::uint64_t seq) {
+    auto snap = std::make_shared<SessionSnapshot>();
+    snap->editorSequence = seq;
+    EditorEntitySnapshot ent;
+    ent.id = id;
+    ent.name = "n";
+    ent.local.translation = {x, 0.f, 0.f};
+    snap->entities.push_back(ent);
+    return snap;
+  };
+  panel.showSnapshot(make(1.f, 1), sel);
+  auto *tx = panel.findChildren<QDoubleSpinBox *>().at(0);
+  tx->setValue(5.0); // optimistic publish bumps local seq past 1
+  CHECK(transforms == 1);
+  panel.showSnapshot(make(9.f, 1), sel); // stale
+  CHECK(tx->value() == doctest::Approx(5.0));
+  panel.showSnapshot(make(7.f, 99), sel); // fresh
+  CHECK(tx->value() == doctest::Approx(7.0));
+}

@@ -2034,3 +2034,4 @@ TEST_CASE("session/material-desc-cow-release-baseline-after-clear-undo-destroy")
   completeAll(h, *s);
   stop(*s, h);
 }
+

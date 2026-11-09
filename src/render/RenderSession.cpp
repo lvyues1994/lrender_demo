@@ -75,6 +75,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   bool started = false, stopRequested = false, faulted = false, unknownAcceptance = false, rebuild = false,
        hardRebuild = false, pathPrepared = false, targetFresh = false;
   bool tickQueued = false, noticeQueued = false, resourcesGone = false;
+  mutable std::uint64_t editorSequence_ = 0;
   SessionGeneration candidateGeneration = 0;
   PresentationPath selectedPath = PresentationPath::Readback;
   bool allowFallback = false, visible = true;
@@ -159,6 +160,8 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       value->device = info.deviceName;
     }
     publishEditorEntities(*value);
+    // E4-minor / E5: monotonic sequence so UI can drop stale snaps after optimistic edits.
+    value->editorSequence = ++editorSequence_;
     return value;
   }
   void publish() {
@@ -614,6 +617,26 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
 
       if (auto const *mat = editor.registry().try_get<editor::MaterialRef>(e))
         snap.materialBase = editor.materialBaseOf(mat->id);
+      // E5: world matrix (parent chain) + pick AABB (unit cube in local, transformed).
+      {
+        lr::core::mat4 world{1.f};
+        std::optional<entt::entity> walk = e;
+        // Collect locals root→leaf then multiply; walk parent chain leaf→root first.
+        std::vector<lr::core::Transform> chain;
+        while (walk && editor.registry().valid(*walk)) {
+          if (auto const *lt = editor.registry().try_get<editor::LocalTransform>(*walk))
+            chain.push_back(lt->value);
+          else
+            chain.push_back(lr::core::Transform::identity());
+          auto const *h = editor.registry().try_get<editor::Hierarchy>(*walk);
+          walk = h ? h->parent : std::nullopt;
+        }
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+          world = world * lr::core::matrixOf(*it);
+        snap.worldMatrix = world;
+        lr::core::Aabb local{{-0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}};
+        snap.worldBounds = lr::core::transformed(local, world);
+      }
       value.entities.push_back(std::move(snap));
     }
   }

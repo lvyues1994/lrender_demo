@@ -43,6 +43,7 @@ private:
   bool dying_ = false;
   std::optional<EditorEntitySnapshot> lastEnt_;
   SessionSnapshotPtr lastSnap_;
+  std::uint64_t localSnapSeq_ = 0;
   editor::SelectionState lastSelection_;
   QLabel *title_ = nullptr;
   QLabel *cameraNote_ = nullptr;

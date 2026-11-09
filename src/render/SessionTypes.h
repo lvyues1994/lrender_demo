@@ -37,6 +37,9 @@ struct EditorEntitySnapshot {
   std::optional<lr::core::MaterialDesc> materialOverride;
   // Install-time / remembered base desc for the original MaterialRef (textures).
   std::optional<lr::core::MaterialDesc> materialBase;
+  // E5: world-space AABB for viewport picking (unit box × world matrix if no mesh AABB).
+  std::optional<lr::core::Aabb> worldBounds;
+  lr::core::mat4 worldMatrix = lr::core::mat4{1.f};
 };
 using AssetRequestId = std::uint64_t;
 using SessionGeneration = std::uint64_t;
@@ -92,6 +95,8 @@ struct SessionSnapshot {
     std::vector<std::string> warnings, assetNotices;
     // Immutable editor scene projection for UI (E4 will enrich; E2 lists TRS/name/parent).
     std::vector<EditorEntitySnapshot> entities;
+    // Monotonic UI/editor publication counter (E5/E4-minor): panels drop stale snaps.
+    std::uint64_t editorSequence = 0;
 };
 using SessionSnapshotPtr = std::shared_ptr<SessionSnapshot const>;
 using Done = std::function<void(Result<std::monostate>)>;

@@ -8,6 +8,7 @@
 #include <QLabel>
 #include <QVBoxLayout>
 #include <cmath>
+#include <algorithm>
 #include <variant>
 
 namespace demo {
@@ -105,6 +106,8 @@ void PropertyPanel::silenceSpins() {
 void PropertyPanel::publishLocalEntToSnap() {
   // Keep lastSnap_ aligned with commits so a deferred FocusOut refill does not
   // revert the just-committed spin value back to a stale external snapshot.
+  // Cost: CoW of SessionSnapshot (entities vector). Only the edited entity is
+  // mutated; gizmo drag should prefer session latest-wins publish, not this path.
   if (!lastSnap_ || !lastEnt_ || !current_.isValid())
     return;
   auto copy = std::make_shared<SessionSnapshot>(*lastSnap_);
@@ -114,11 +117,16 @@ void PropertyPanel::publishLocalEntToSnap() {
       break;
     }
   }
+  // Optimistic local sequence ahead of any in-flight older session publish.
+  copy->editorSequence = std::max(localSnapSeq_, lastSnap_->editorSequence) + 1;
+  localSnapSeq_ = copy->editorSequence;
   lastSnap_ = std::move(copy);
 }
 
 void PropertyPanel::scheduleFocusOutRefill() {
   QPointer<PropertyPanel> self(this);
+  // QTimer context object is `this`: Qt cancels the lambda if PropertyPanel is
+  // destroyed before it fires. The !self / dying_ checks are defense in depth.
   QTimer::singleShot(0, this, [self] {
     if (!self || self->dying_ || !self->lastSnap_)
       return;
@@ -181,7 +189,12 @@ void PropertyPanel::showSnapshot(SessionSnapshotPtr snap,
                                  editor::SelectionState const &selection) {
   if (dying_)
     return;
+  // Drop session snaps older than an optimistic local edit (E4-minor / E5 gizmo).
+  if (snap && snap->editorSequence < localSnapSeq_)
+    return;
   syncing_ = true;
+  if (snap)
+    localSnapSeq_ = snap->editorSequence;
   lastSnap_ = snap;
   lastSelection_ = selection;
   current_ = selection.primary().value_or(EditorEntityId{});
@@ -274,6 +287,7 @@ void PropertyPanel::emitLight() {
       commands_.clearLight(current_);
     if (lastEnt_)
       lastEnt_->light = std::nullopt;
+    publishLocalEntToSnap();
     return;
   }
   // Minor2: preserve light type, color, and direction; only edit intensity/illuminance.
