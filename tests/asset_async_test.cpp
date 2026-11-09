@@ -1009,9 +1009,11 @@ TEST_CASE("asset_async/dirty-edits-during-install-then-cancel") {
 
 
 
-TEST_CASE("asset_async/cancel-after-dirty-edits-schedules-extraction") {
-  // I6: mid-install Dirty edits + cancel must readopt AND markDirty so a follow-up
-  // extract publishes the edited transforms (not silent for 3s).
+TEST_CASE("asset_async/cancel-after-dirty-edits-keeps-transforms") {
+  // Mid-install Dirty edits + cancel must readopt and keep transforms.
+  // Frame extraction after cancel comes from the edit commands themselves
+  // (setEntityTransform/createEditorEntity already pump.markDirty); readopt's
+  // defensive markDirty is optional, not the primary wake source.
   App app([](auto const &e, auto) -> Result<CpuAssetPtr> {
     if (e.id.value == "diablo")
       return fixture(e.id.value, 64);
@@ -1099,7 +1101,7 @@ TEST_CASE("asset_async/cancel-after-dirty-edits-schedules-extraction") {
            session.snapshot()->installedModel->value == "african_head";
   }));
   CHECK(session.snapshot()->life != LifeState::Failed);
-  // I6: a new extraction must land after cancel/readopt with edited values visible.
+  // A follow-up extraction (from edit-time dirty) must land with edited values.
   REQUIRE(test::until([&] {
     return session.snapshot()->performance.deltaExtractions > extractAtArm;
   }));
@@ -1216,6 +1218,8 @@ TEST_CASE("asset_async/install-fail-mid-staging-readopts-unsynced-edits") {
   }));
   {
     auto snap = session.snapshot();
+    REQUIRE(snap->error.has_value());
+    CHECK(snap->error->message == "asset installation failed closed");
     CHECK(snap->installedModel.has_value());
     CHECK(snap->installedModel->value == "african_head");
     EditorEntityId newP0{}, newP1{}, uId{}, childId{};
@@ -1249,10 +1253,9 @@ TEST_CASE("asset_async/install-fail-mid-staging-readopts-unsynced-edits") {
   stop(session, h);
 }
 
-TEST_CASE("asset_async/install-edit-outcomes-cancel-fail-commit") {
-  // I7 combo matrix (fixed seed of outcomes): install-window edits × cancel / fail / commit.
-  // Cancel + commit covered by sibling cases; this seeds a short cancel→commit sequence
-  // asserting extraction after cancel and clearForModelSwitch on commit.
+TEST_CASE("asset_async/install-edit-outcomes-cancel-then-commit") {
+  // Install-window edits × cancel, then commit: extraction after cancel and
+  // clearForModelSwitch on commit. Fail path covered by install-fail-mid-staging.
   App app([](auto const &e, auto) -> Result<CpuAssetPtr> {
     if (e.id.value == "diablo")
       return fixture(e.id.value, 8);
@@ -1337,6 +1340,70 @@ TEST_CASE("asset_async/install-edit-outcomes-cancel-fail-commit") {
     for (auto const &e : snap->entities)
       CHECK(e.name != "under");
   }
+  stop(session, h);
+}
+
+
+TEST_CASE("asset_async/install-edit-outcomes-mid-fail") {
+  // Fail branch of the install-edit outcomes matrix (poisoned step → Failed + edits kept).
+  // Detailed assertions live in install-fail-mid-staging-readopts-unsynced-edits.
+  CpuAssetPtr poison;
+  App app([&](auto const &e, auto) -> Result<CpuAssetPtr> {
+    if (e.id.value != "diablo")
+      return fixture(e.id.value, 2);
+    auto live = std::make_shared<CpuAsset>(*fixture(e.id.value, 2));
+    live->parts[1].mesh =
+        std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({.4f, .4f}));
+    poison = live;
+    return poison;
+  });
+  auto r = resources(app);
+  Harness h;
+  RenderSession *owner = nullptr;
+  bool armed = false, poisoned = false;
+  auto events = h.events();
+  events.onSnapshot = [&](auto snap) {
+    if (!owner || !armed || poisoned)
+      return;
+    if (snap->assetInstalling && snap->installationParts >= 1) {
+      for (auto const &e : snap->entities)
+        if (e.installed && e.name.find("/part1") != std::string::npos) {
+          lr::core::Transform xf = e.local;
+          xf.translation.x = 8.f;
+          owner->setEntityTransform(e.id, xf);
+          break;
+        }
+      if (poison && poison->parts.size() > 1)
+        std::const_pointer_cast<CpuAsset>(poison)->parts[1].mesh = {};
+      poisoned = true;
+    }
+  };
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), std::move(events));
+  owner = &session;
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel && h.image &&
+           h.image->stamp.generation == session.snapshot()->generation;
+  }));
+  armed = true;
+  session.selectModel({"diablo"});
+  REQUIRE(test::until([&] {
+    return poisoned && session.snapshot()->life == LifeState::Failed;
+  }));
+  auto snap = session.snapshot();
+  REQUIRE(snap->error.has_value());
+  CHECK(snap->error->message == "asset installation failed closed");
+  bool partAt8 = false;
+  for (auto const &e : snap->entities)
+    if (e.installed && e.name.find("/part1") != std::string::npos &&
+        e.local.translation.x == 8.f)
+      partAt8 = true;
+  CHECK(partAt8);
   stop(session, h);
 }
 

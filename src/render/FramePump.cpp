@@ -6,7 +6,6 @@ FramePump::FramePump(unsigned capacity):capacity_(capacity) {
  if(capacity!=1 && capacity!=2) throw std::invalid_argument("FramePump capacity must be 1 or 2");
 }
 void FramePump::markDirty() {if(!stopped_) dirty_=true;}
-void FramePump::clearDirty() {dirty_=false;}
 void FramePump::setContinuous(bool enabled) {if(!stopped_) continuous_=enabled;}
 void FramePump::setPaused(bool paused) {if(!stopped_) paused_=paused;}
 void FramePump::stop() {stopped_=true;dirty_=false;continuous_=false;}

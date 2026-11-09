@@ -12,7 +12,6 @@ public:
  FramePump(FramePump const&)=delete;
  FramePump& operator=(FramePump const&)=delete;
  void markDirty();
- void clearDirty(); // test/probe: drop dirty without extract
  void setContinuous(bool);
  void setPaused(bool); // preserves dirty and outstanding work
  void stop(); // irreversible; no new tickets, existing work must still complete
