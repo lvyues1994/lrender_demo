@@ -32,6 +32,7 @@ void coalesceInto(EditorCommand &dst, EditorCommand const &src) {
         } else if constexpr (std::is_same_v<T, MaterialCommand>) {
           d.meshAfter = s.meshAfter;
           d.materialAfter = s.materialAfter;
+          d.overrideAfter = s.overrideAfter;
         } else if constexpr (std::is_same_v<T, HierarchyCommand>) {
           d.after = s.after;
         } else if constexpr (std::is_same_v<T, MaterialDescCommand>) {
@@ -126,8 +127,11 @@ void CommandHistory::recordTransform(entt::entity entity, lr::core::Transform be
 void CommandHistory::recordMaterial(
     entt::entity entity,
     std::optional<std::pair<lr::core::MeshId, lr::core::MaterialId>> before,
-    lr::core::MeshId meshAfter, lr::core::MaterialId materialAfter) {
-  pushNew(MaterialCommand{entity, std::move(before), meshAfter, materialAfter});
+    lr::core::MeshId meshAfter, lr::core::MaterialId materialAfter,
+    std::optional<lr::core::MaterialDesc> overrideBefore,
+    std::optional<lr::core::MaterialDesc> overrideAfter) {
+  pushNew(MaterialCommand{entity, std::move(before), meshAfter, materialAfter,
+                          std::move(overrideBefore), std::move(overrideAfter)});
 }
 
 void CommandHistory::recordHierarchy(entt::entity entity, std::optional<entt::entity> before,
@@ -155,8 +159,11 @@ void CommandHistory::executeMaterial(EditorScene &scene, entt::entity entity,
   if (!scene.registry().valid(entity))
     return;
   auto before = materialBeforeOf(scene, entity);
-  scene.setMeshMaterial(entity, mesh, material);
-  recordMaterial(entity, before, mesh, material);
+  std::optional<lr::core::MaterialDesc> ovrBefore;
+  if (auto const *ovr = scene.registry().try_get<MaterialOverride>(entity))
+    ovrBefore = ovr->value;
+  scene.setMeshMaterial(entity, mesh, material); // clears override
+  recordMaterial(entity, before, mesh, material, ovrBefore, std::nullopt);
 }
 
 void CommandHistory::executeHierarchy(EditorScene &scene, entt::entity entity,
@@ -195,6 +202,9 @@ void CommandHistory::applyBefore(EditorScene &scene, EditorCommand const &cmd) {
             scene.setMeshMaterial(c.entity, c.before->first, c.before->second);
           else
             scene.clearMeshMaterial(c.entity);
+          // Restore override after ref swap (setMeshMaterial clears it).
+          if (c.overrideBefore)
+            scene.setMaterialOverride(c.entity, *c.overrideBefore);
         } else if constexpr (std::is_same_v<T, HierarchyCommand>) {
           scene.setParent(c.entity, c.before);
         } else if constexpr (std::is_same_v<T, MaterialDescCommand>) {
@@ -214,6 +224,8 @@ void CommandHistory::applyAfter(EditorScene &scene, EditorCommand const &cmd) {
           scene.setLocalTransform(c.entity, c.after);
         } else if constexpr (std::is_same_v<T, MaterialCommand>) {
           scene.setMeshMaterial(c.entity, c.meshAfter, c.materialAfter);
+          if (c.overrideAfter)
+            scene.setMaterialOverride(c.entity, *c.overrideAfter);
         } else if constexpr (std::is_same_v<T, HierarchyCommand>) {
           scene.setParent(c.entity, c.after);
         } else if constexpr (std::is_same_v<T, MaterialDescCommand>) {

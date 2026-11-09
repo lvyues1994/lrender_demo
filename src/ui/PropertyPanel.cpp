@@ -2,6 +2,7 @@
 
 #include <QDoubleSpinBox>
 #include <QEvent>
+#include <QPointer>
 #include <QFormLayout>
 #include <QLabel>
 #include <QVBoxLayout>
@@ -63,6 +64,13 @@ PropertyPanel::PropertyPanel(PropertyCommands commands, QWidget *parent)
   cameraNote_->setWordWrap(true);
   cameraNote_->setObjectName(QStringLiteral("cameraViewportNote"));
   layout->addWidget(cameraNote_);
+  materialSessionNote_ = new QLabel(
+      QStringLiteral("Session normal-mapping / roughness apply to the shared original "
+                     "material only; entities with a material override keep their override."),
+      this);
+  materialSessionNote_->setWordWrap(true);
+  materialSessionNote_->setObjectName(QStringLiteral("materialSessionNote"));
+  layout->addWidget(materialSessionNote_);
   wireSpin(tx_, [this] { emitTransform(); });
   wireSpin(ty_, [this] { emitTransform(); });
   wireSpin(tz_, [this] { emitTransform(); });
@@ -77,19 +85,39 @@ PropertyPanel::PropertyPanel(PropertyCommands commands, QWidget *parent)
   wireSpin(far_, [this] { emitCamera(); });
 }
 
+std::vector<QDoubleSpinBox *> PropertyPanel::allSpins() const {
+  return {tx_, ty_, tz_, sx_, sy_, sz_, roughness_, metallic_, lightIntensity_, fov_, near_,
+          far_};
+}
+
+void PropertyPanel::silenceSpins() {
+  for (auto *s : allSpins()) {
+    if (!s)
+      continue;
+    s->blockSignals(true);
+    s->removeEventFilter(this);
+    disconnect(s, nullptr, this, nullptr);
+  }
+}
+
+PropertyPanel::~PropertyPanel() {
+  // I-B: ~QWidget may FocusOut → valueChanged while members are already torn down.
+  dying_ = true;
+  silenceSpins();
+}
+
 void PropertyPanel::wireSpin(QDoubleSpinBox *s, std::function<void()> fn) {
   s->installEventFilter(this);
-  // Capture syncing_ by address to avoid UBSan false positive on QWidget/PropertyPanel
-  // this-pointer when Qt invokes the functor (vptr seen as QWidget under -fsanitize=undefined).
-  bool *const syncFlag = &syncing_;
-  connect(s, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
-          [fn, syncFlag](double) {
-            if (!*syncFlag)
-              fn();
-          });
+  connect(s, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this, fn](double) {
+    if (dying_ || syncing_)
+      return;
+    fn();
+  });
 }
 
 bool PropertyPanel::eventFilter(QObject *watched, QEvent *event) {
+  if (dying_)
+    return QWidget::eventFilter(watched, event);
   if (qobject_cast<QDoubleSpinBox *>(watched)) {
     if (event->type() == QEvent::FocusIn) {
       if (commands_.beginEditMerge)
@@ -97,6 +125,9 @@ bool PropertyPanel::eventFilter(QObject *watched, QEvent *event) {
     } else if (event->type() == QEvent::FocusOut) {
       if (commands_.endEditMerge)
         commands_.endEditMerge();
+      // Minor1: refill from latest snapshot after blur (e.g. undo while focused).
+      if (lastSnap_)
+        showSnapshot(lastSnap_, lastSelection_);
     }
   }
   return QWidget::eventFilter(watched, event);
@@ -123,7 +154,11 @@ PropertyPanel::findEntity(SessionSnapshotPtr const &snap, EditorEntityId id) con
 
 void PropertyPanel::showSnapshot(SessionSnapshotPtr snap,
                                  editor::SelectionState const &selection) {
+  if (dying_)
+    return;
   syncing_ = true;
+  lastSnap_ = snap;
+  lastSelection_ = selection;
   current_ = selection.primary().value_or(EditorEntityId{});
   auto ent = findEntity(snap, current_);
   lastEnt_ = ent;
@@ -173,7 +208,7 @@ void PropertyPanel::showSnapshot(SessionSnapshotPtr snap,
 }
 
 void PropertyPanel::emitTransform() {
-  if (!commands_.setTransform || !current_.isValid())
+  if (dying_ || !commands_.setTransform || !current_.isValid())
     return;
   // I1: copy local from snapshot (preserves rotation); only overwrite TRS fields we edit.
   lr::core::Transform xf =
@@ -188,7 +223,7 @@ void PropertyPanel::emitTransform() {
 }
 
 void PropertyPanel::emitMaterial() {
-  if (!commands_.setMaterialDesc || !current_.isValid())
+  if (dying_ || !commands_.setMaterialDesc || !current_.isValid())
     return;
   // C1: seed from override or materialBase so textures survive; only edit factors.
   lr::core::MaterialDesc desc{};
@@ -204,7 +239,7 @@ void PropertyPanel::emitMaterial() {
 }
 
 void PropertyPanel::emitLight() {
-  if (!commands_.setLight || !current_.isValid())
+  if (dying_ || !commands_.setLight || !current_.isValid())
     return;
   float intensity = static_cast<float>(lightIntensity_->value());
   if (intensity <= 0.f) {
@@ -233,7 +268,7 @@ void PropertyPanel::emitLight() {
 }
 
 void PropertyPanel::emitCamera() {
-  if (!commands_.setCamera || !current_.isValid())
+  if (dying_ || !commands_.setCamera || !current_.isValid())
     return;
   lr::scene::CameraLens lens{};
   if (lastEnt_ && lastEnt_->camera)

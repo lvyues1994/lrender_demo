@@ -298,3 +298,100 @@ TEST_CASE("ui_editor/offscreen-panel-to-session-callbacks-full-chain") {
   CHECK(log.lastMat.baseColorTexture.has_value());
   CHECK(log.merges >= 1);
 }
+
+TEST_CASE("ui_editor/property-panel-dtor-with-focus-emits-no-commands") {
+  // I-B: destroying panel while spin focused must not emit (focusOut/valueChanged during ~QWidget).
+  REQUIRE(QApplication::instance());
+  int transforms = 0;
+  int materials = 0;
+  {
+    demo::PropertyCommands cmd;
+    cmd.setTransform = [&](EditorEntityId, lr::core::Transform) { ++transforms; };
+    cmd.setMaterialDesc = [&](EditorEntityId, lr::core::MaterialDesc) { ++materials; };
+    auto *panel = new demo::PropertyPanel(cmd);
+    panel->setWindowFlags(Qt::Window);
+    panel->show();
+    SelectionState sel;
+    EditorEntityId id{9};
+    sel.setPrimary(id);
+    auto snap = std::make_shared<SessionSnapshot>();
+    EditorEntitySnapshot ent;
+    ent.id = id;
+    ent.name = "n";
+    ent.local.translation = {1.f, 0.f, 0.f};
+    snap->entities.push_back(ent);
+    panel->showSnapshot(snap, sel);
+    auto spins = panel->findChildren<QDoubleSpinBox *>();
+    REQUIRE_FALSE(spins.empty());
+    auto *tx = spins[0];
+    QFocusEvent in(QEvent::FocusIn, Qt::OtherFocusReason);
+    QCoreApplication::sendEvent(tx, &in);
+    auto *le = tx->findChild<QLineEdit *>();
+    if (le)
+      le->setText(QStringLiteral("3.25"));
+    transforms = 0;
+    materials = 0;
+    delete panel; // must not fire commands via focus-out chain
+    QCoreApplication::processEvents();
+  }
+  CHECK(transforms == 0);
+  CHECK(materials == 0);
+}
+
+TEST_CASE("ui_editor/property-panel-focusout-refills-from-snapshot") {
+  // Minor1: while focused, snapshot changes (e.g. undo); on FocusOut, spin shows snapshot value.
+  // Mutations: noFocusSkip (always setValue) still refill on focus-out; noBaseSeed fails material path.
+  REQUIRE(QApplication::instance());
+  demo::PropertyCommands cmd;
+  demo::PropertyPanel panel(cmd);
+  panel.setWindowFlags(Qt::Window);
+  panel.show();
+  SelectionState sel;
+  EditorEntityId id{5};
+  sel.setPrimary(id);
+  auto snap = std::make_shared<SessionSnapshot>();
+  EditorEntitySnapshot ent;
+  ent.id = id;
+  ent.name = "n";
+  ent.local.translation = {1.f, 0.f, 0.f};
+  lr::core::MaterialDesc base{};
+  base.roughness = 0.4f;
+  base.metallic = 0.1f;
+  base.baseColorTexture = lr::core::TextureId{7};
+  ent.materialBase = base;
+  snap->entities.push_back(ent);
+  panel.showSnapshot(snap, sel);
+  auto spins = panel.findChildren<QDoubleSpinBox *>();
+  REQUIRE(spins.size() >= 8);
+  auto *tx = spins[0];
+  auto *rough = spins[6];
+  QFocusEvent in(QEvent::FocusIn, Qt::OtherFocusReason);
+  QCoreApplication::sendEvent(tx, &in);
+  // Simulate undo while focused: snapshot translation changes; focused spin skips setValue.
+  ent.local.translation.x = 9.f;
+  ent.materialOverride = base;
+  ent.materialOverride->roughness = 0.12f;
+  snap = std::make_shared<SessionSnapshot>();
+  snap->entities.push_back(ent);
+  panel.showSnapshot(snap, sel);
+  // Focus out → refill from last snapshot
+  QFocusEvent out(QEvent::FocusOut, Qt::OtherFocusReason);
+  QCoreApplication::sendEvent(tx, &out);
+  QCoreApplication::processEvents();
+  CHECK(tx->value() == doctest::Approx(9.0));
+  // Material spin without focus should already show override; ensure base seed used for emit
+  std::optional<lr::core::MaterialDesc> got;
+  demo::PropertyCommands cmd2;
+  cmd2.setMaterialDesc = [&](EditorEntityId, lr::core::MaterialDesc d) { got = d; };
+  demo::PropertyPanel panel2(cmd2);
+  SelectionState sel2;
+  sel2.setPrimary(id);
+  panel2.showSnapshot(snap, sel2);
+  auto spins2 = panel2.findChildren<QDoubleSpinBox *>();
+  spins2[6]->setValue(0.15);
+  REQUIRE(got.has_value());
+  CHECK(got->baseColorTexture.has_value());
+  CHECK(got->baseColorTexture->value == 7);
+  CHECK(got->roughness == doctest::Approx(0.15f));
+  (void)rough;
+}

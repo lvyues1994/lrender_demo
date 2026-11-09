@@ -527,3 +527,59 @@ TEST_CASE("undo/forget-entity-drops-parent-refs") {
   hist.forgetEntity(parent);
   CHECK_FALSE(hist.canUndo());
 }
+
+TEST_CASE("undo/material-swap-restores-override") {
+  // I-A: setMeshMaterial clears override; undo of the swap must restore MaterialDesc.
+  EditorScene scene;
+  auto w = lr::scene::makeWorld({});
+  auto mesh = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+  lr::core::MaterialDesc baseA{};
+  baseA.roughness = 0.5f;
+  auto matA = w->resources().addMaterial(baseA);
+  lr::core::MaterialDesc baseB{};
+  baseB.roughness = 0.8f;
+  auto matB = w->resources().addMaterial(baseB);
+  scene.rememberMaterialBase(matA, baseA);
+
+  auto e = scene.create("m", {});
+  scene.setMeshMaterial(e, mesh, matA);
+  CommandHistory hist;
+  lr::core::MaterialDesc ovr = baseA;
+  ovr.roughness = 0.12f;
+  hist.executeMaterialDesc(scene, e, ovr);
+  REQUIRE(scene.registry().all_of<MaterialOverride>(e));
+  CHECK(scene.registry().get<MaterialOverride>(e).value.roughness == doctest::Approx(0.12f));
+
+  hist.executeMaterial(scene, e, mesh, matB);
+  CHECK_FALSE(scene.registry().all_of<MaterialOverride>(e));
+  CHECK(scene.registry().get<MaterialRef>(e).id == matB);
+
+  hist.undo(scene); // undo material swap → matA + override 0.12
+  REQUIRE(scene.registry().get<MaterialRef>(e).id == matA);
+  REQUIRE(scene.registry().all_of<MaterialOverride>(e));
+  CHECK(scene.registry().get<MaterialOverride>(e).value.roughness == doctest::Approx(0.12f));
+
+  scene.syncToWorld(*w);
+  auto wid = scene.registry().get<WorldLink>(e).id;
+  auto rend = w->renderableOf(wid);
+  REQUIRE(rend);
+  CHECK(rend->material != matA); // CoW copy
+  auto delta = w->extractDelta();
+  bool saw = false;
+  for (auto const &mu : delta.materials) {
+    if (mu.id == rend->material) {
+      saw = true;
+      CHECK(mu.material.roughness == doctest::Approx(0.12f));
+    }
+  }
+  CHECK(saw);
+
+  hist.redo(scene);
+  CHECK(scene.registry().get<MaterialRef>(e).id == matB);
+  CHECK_FALSE(scene.registry().all_of<MaterialOverride>(e));
+
+  hist.undo(scene);
+  REQUIRE(scene.registry().all_of<MaterialOverride>(e));
+  CHECK(scene.registry().get<MaterialOverride>(e).value.roughness == doctest::Approx(0.12f));
+}

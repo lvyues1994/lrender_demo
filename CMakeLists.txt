@@ -88,8 +88,6 @@ endif()
 target_compile_definitions(demo_core PRIVATE DEMO_TINYRENDERER_ROOT="${PROJECT_SOURCE_DIR}/assets/sources/tinyrenderer")
 
 add_library(demo_ui STATIC src/ui/MainWindow.cpp src/ui/ViewportHost.cpp src/ui/HierarchyPanel.cpp src/ui/PropertyPanel.cpp)
-# Qt QWidget/QObject functors trip UBSan vptr when lambdas call PropertyPanel members.
-set_source_files_properties(src/ui/PropertyPanel.cpp PROPERTIES COMPILE_OPTIONS "-fno-sanitize=vptr")
 
 target_link_libraries(demo_ui PUBLIC demo_native_surface)
 target_link_libraries(demo_tests PRIVATE demo_ui)

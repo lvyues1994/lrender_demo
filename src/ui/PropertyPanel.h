@@ -6,6 +6,7 @@
 #include <QWidget>
 #include <functional>
 #include <optional>
+#include <vector>
 
 class QDoubleSpinBox;
 class QFormLayout;
@@ -29,6 +30,7 @@ struct PropertyCommands {
 class PropertyPanel : public QWidget {
 public:
   explicit PropertyPanel(PropertyCommands commands, QWidget *parent = nullptr);
+  ~PropertyPanel() override;
   void showSnapshot(SessionSnapshotPtr snap, editor::SelectionState const &selection);
 
 protected:
@@ -38,9 +40,13 @@ private:
   PropertyCommands commands_;
   EditorEntityId current_{};
   bool syncing_ = false;
+  bool dying_ = false;
   std::optional<EditorEntitySnapshot> lastEnt_;
+  SessionSnapshotPtr lastSnap_;
+  editor::SelectionState lastSelection_;
   QLabel *title_ = nullptr;
   QLabel *cameraNote_ = nullptr;
+  QLabel *materialSessionNote_ = nullptr;
   QDoubleSpinBox *tx_ = nullptr, *ty_ = nullptr, *tz_ = nullptr;
   QDoubleSpinBox *sx_ = nullptr, *sy_ = nullptr, *sz_ = nullptr;
   QDoubleSpinBox *roughness_ = nullptr, *metallic_ = nullptr;
@@ -54,6 +60,8 @@ private:
   void emitCamera();
   void wireSpin(QDoubleSpinBox *s, std::function<void()> fn);
   void setSpinValue(QDoubleSpinBox *s, double v);
+  void silenceSpins();
+  std::vector<QDoubleSpinBox *> allSpins() const;
   std::optional<EditorEntitySnapshot> findEntity(SessionSnapshotPtr const &snap,
                                                  EditorEntityId id) const;
 };

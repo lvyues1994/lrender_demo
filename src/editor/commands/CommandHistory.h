@@ -35,6 +35,9 @@ struct MaterialCommand {
   std::optional<std::pair<lr::core::MeshId, lr::core::MaterialId>> before{};
   lr::core::MeshId meshAfter{};
   lr::core::MaterialId materialAfter{};
+  // I-A: setMeshMaterial clears MaterialOverride; undo/redo must restore it.
+  std::optional<lr::core::MaterialDesc> overrideBefore{};
+  std::optional<lr::core::MaterialDesc> overrideAfter{};
 };
 
 struct HierarchyCommand {
@@ -65,7 +68,9 @@ public:
                        lr::core::Transform after);
   void recordMaterial(entt::entity entity,
                       std::optional<std::pair<lr::core::MeshId, lr::core::MaterialId>> before,
-                      lr::core::MeshId meshAfter, lr::core::MaterialId materialAfter);
+                      lr::core::MeshId meshAfter, lr::core::MaterialId materialAfter,
+                      std::optional<lr::core::MaterialDesc> overrideBefore = std::nullopt,
+                      std::optional<lr::core::MaterialDesc> overrideAfter = std::nullopt);
   void recordHierarchy(entt::entity entity, std::optional<entt::entity> before,
                        std::optional<entt::entity> after);
   void recordMaterialDesc(entt::entity entity, lr::core::MaterialId material,

@@ -698,7 +698,16 @@ TEST_CASE("editor/material-override-cow-preserves-textures-and-original-ref") {
   CHECK(ovr2.value.baseColorTexture.has_value());
   CHECK(w->renderableOf(w0)->material == copyBefore);
   CHECK(w->renderableOf(w1)->material == mat);
-  (void)w->extractDelta();
+  auto deltaEdit = w->extractDelta();
+  bool sawReplace = false;
+  for (auto const &mu : deltaEdit.materials) {
+    if (mu.id == copyBefore) {
+      sawReplace = true;
+      CHECK(mu.material.roughness == doctest::Approx(0.35f));
+      CHECK(mu.material.baseColorTexture.has_value());
+    }
+  }
+  CHECK(sawReplace);
   demo::test::assertEditorWorldConsistent(s, *w);
 
   s.clearMaterialOverride(e0);
@@ -711,4 +720,45 @@ TEST_CASE("editor/material-override-cow-preserves-textures-and-original-ref") {
       restored = true;
   CHECK(restored);
   demo::test::assertEditorWorldConsistent(s, *w);
+}
+
+
+TEST_CASE("editor/material-override-cow-releases-on-clear-and-destroy") {
+  // I-C: clear override / destroy entity must release CoW material (counts back to baseline).
+  EditorScene s;
+  auto w = lr::scene::makeWorld({});
+  auto mesh = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+  lr::core::MaterialDesc base{};
+  base.roughness = 0.5f;
+  auto mat = w->resources().addMaterial(base);
+  s.rememberMaterialBase(mat, base);
+  auto e = s.create("p", {});
+  s.setMeshMaterial(e, mesh, mat);
+  s.syncToWorld(*w);
+  w->extractDelta();
+  auto baseline = w->resources().counts().materials;
+
+  lr::core::MaterialDesc ovr = base;
+  ovr.roughness = 0.11f;
+  s.setMaterialOverride(e, ovr);
+  s.syncToWorld(*w);
+  w->extractDelta();
+  CHECK(w->resources().counts().materials == baseline + 1);
+
+  s.clearMaterialOverride(e);
+  s.syncToWorld(*w);
+  auto deltaClear = w->extractDelta();
+  CHECK_FALSE(deltaClear.removed.materials.empty());
+  CHECK(w->resources().counts().materials == baseline);
+
+  s.setMaterialOverride(e, ovr);
+  s.syncToWorld(*w);
+  w->extractDelta();
+  CHECK(w->resources().counts().materials == baseline + 1);
+  s.destroy(e);
+  s.syncToWorld(*w);
+  auto deltaDestroy = w->extractDelta();
+  CHECK_FALSE(deltaDestroy.removed.materials.empty());
+  CHECK(w->resources().counts().materials == baseline);
 }

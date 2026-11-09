@@ -1295,8 +1295,11 @@ void RenderSession::setEntityMeshMaterial(EditorEntityId id, lr::core::MeshId me
   std::optional<std::pair<lr::core::MeshId, lr::core::MaterialId>> before;
   if (meshRef && matRef)
     before = std::make_pair(meshRef->id, matRef->id);
-  s.editor.setMeshMaterial(e, mesh, material);
-  s.history.recordMaterial(e, before, mesh, material);
+  std::optional<lr::core::MaterialDesc> ovrBefore;
+  if (auto const *ovr = s.editor.registry().try_get<editor::MaterialOverride>(e))
+    ovrBefore = ovr->value;
+  s.editor.setMeshMaterial(e, mesh, material); // clears override
+  s.history.recordMaterial(e, before, mesh, material, ovrBefore, std::nullopt);
   s.pump.markDirty();
   s.queueTick();
   s.publish();

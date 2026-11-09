@@ -21,6 +21,7 @@ class HierarchyPanel : public QTreeWidget {
   Q_OBJECT
 public:
   explicit HierarchyPanel(HierarchyCommands commands, QWidget *parent = nullptr);
+  ~HierarchyPanel() override;
   void showSnapshot(SessionSnapshotPtr snap, editor::SelectionState const &selection);
 
 private:

@@ -26,6 +26,12 @@ HierarchyPanel::HierarchyPanel(HierarchyCommands commands, QWidget *parent)
   connect(this, &QTreeWidget::itemSelectionChanged, this, [this] { onSelectionChanged(); });
 }
 
+HierarchyPanel::~HierarchyPanel() {
+  // Avoid selectionChanged / item churn during QTreeWidget teardown notifying commands.
+  blockSignals(true);
+}
+
+
 void HierarchyPanel::showSnapshot(SessionSnapshotPtr snap,
                                   editor::SelectionState const &selection) {
   if (!snap)

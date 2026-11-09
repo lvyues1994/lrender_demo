@@ -1855,3 +1855,182 @@ TEST_CASE("session/material-desc-not-recorded-when-missing-ref") {
   REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
   stop(*s, h);
 }
+
+TEST_CASE("session/material-desc-override-survives-mesh-material-undo") {
+  // I-A: override → setEntityMeshMaterial (clears) → undo restores override in snapshot.
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  REQUIRE_FALSE(h.jobs[0].frame.delta.instances.empty());
+  auto mesh = h.jobs[0].frame.delta.instances[0].mesh;
+  auto matA = h.jobs[0].frame.delta.instances[0].material;
+  auto id = s->createEditorEntity("p", {});
+  s->setEntityMeshMaterial(id, mesh, matA);
+  lr::core::MaterialDesc desc{};
+  desc.roughness = 0.12f;
+  s->setEntityMaterialDesc(id, desc);
+  {
+    auto snap = s->snapshot();
+    bool ok = false;
+    for (auto const &e : snap->entities)
+      if (e.id == id && e.materialOverride &&
+          e.materialOverride->roughness == doctest::Approx(0.12f))
+        ok = true;
+    REQUIRE(ok);
+  }
+  s->setEntityMeshMaterial(id, mesh, matA); // clears override
+  {
+    auto snap = s->snapshot();
+    for (auto const &e : snap->entities)
+      if (e.id == id)
+        CHECK_FALSE(e.materialOverride.has_value());
+  }
+  REQUIRE(s->canUndo());
+  s->undo();
+  {
+    auto snap = s->snapshot();
+    bool ok = false;
+    for (auto const &e : snap->entities)
+      if (e.id == id && e.materialOverride &&
+          e.materialOverride->roughness == doctest::Approx(0.12f))
+        ok = true;
+    CHECK(ok);
+  }
+  s->redo();
+  {
+    auto snap = s->snapshot();
+    for (auto const &e : snap->entities)
+      if (e.id == id)
+        CHECK_FALSE(e.materialOverride.has_value());
+  }
+  s->undo();
+  {
+    auto snap = s->snapshot();
+    bool ok = false;
+    for (auto const &e : snap->entities)
+      if (e.id == id && e.materialOverride &&
+          e.materialOverride->roughness == doctest::Approx(0.12f))
+        ok = true;
+    CHECK(ok);
+  }
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+}
+
+namespace {
+void completeAll(Harness &h, RenderSession &s) {
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s.snapshot()->performance.inFlight == 0; }));
+}
+void waitJobAndComplete(Harness &h, RenderSession &s, std::size_t before) {
+  REQUIRE(test::until([&] { return h.jobs.size() > before; }));
+  completeAll(h, s);
+}
+} // namespace
+
+TEST_CASE("session/material-desc-cow-repeated-edits-emit-material-deltas") {
+  // I-C: N consecutive override edits; each waits for frame; delta.materials has copy + new value.
+  // Mutation deleting replaceMaterial (EditorScene applyRenderable else-branch) must FAIL.
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  completeAll(h, *s);
+  auto mesh = h.jobs[0].frame.delta.instances[0].mesh;
+  auto mat = h.jobs[0].frame.delta.instances[0].material;
+  auto id = s->createEditorEntity("p", {});
+  s->setEntityMeshMaterial(id, mesh, mat);
+  completeAll(h, *s);
+
+  lr::core::MaterialId copyId{};
+  constexpr int N = 3;
+  for (int i = 0; i < N; ++i) {
+    float rough = 0.1f * static_cast<float>(i + 1);
+    lr::core::MaterialDesc desc{};
+    desc.roughness = rough;
+    desc.metallic = 0.2f;
+    auto before = h.jobs.size();
+    s->setEntityMaterialDesc(id, desc);
+    REQUIRE(test::until([&] { return h.jobs.size() > before; }));
+    completeAll(h, *s);
+    bool saw = false;
+    for (std::size_t j = before; j < h.jobs.size(); ++j) {
+      for (auto const &mu : h.jobs[j].frame.delta.materials) {
+        if (mu.material.roughness == doctest::Approx(rough)) {
+          saw = true;
+          if (i == 0)
+            copyId = mu.id;
+          else
+            CHECK(mu.id == copyId);
+          CHECK(mu.id != mat);
+        }
+      }
+    }
+    CHECK(saw);
+  }
+  s->pause();
+  completeAll(h, *s);
+  stop(*s, h);
+}
+
+TEST_CASE("session/material-desc-cow-release-baseline-after-clear-undo-destroy") {
+  // I-C: after clear / undo-to-no-override / destroy, CoW materials released (net since baseline == 0).
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  completeAll(h, *s);
+  auto mesh = h.jobs[0].frame.delta.instances[0].mesh;
+  auto mat = h.jobs[0].frame.delta.instances[0].material;
+  auto id = s->createEditorEntity("p", {});
+  s->setEntityMeshMaterial(id, mesh, mat);
+  completeAll(h, *s);
+  auto jobsAtBaseline = h.jobs.size();
+  auto netSince = [&]() -> int {
+    int n = 0;
+    for (std::size_t i = jobsAtBaseline; i < h.jobs.size(); ++i) {
+      n += static_cast<int>(h.jobs[i].frame.delta.materials.size());
+      n -= static_cast<int>(h.jobs[i].frame.delta.removed.materials.size());
+    }
+    return n;
+  };
+
+  lr::core::MaterialDesc desc{};
+  desc.roughness = 0.22f;
+  auto mark = h.jobs.size();
+  s->setEntityMaterialDesc(id, desc);
+  waitJobAndComplete(h, *s, mark);
+  CHECK(netSince() == 1);
+
+  mark = h.jobs.size();
+  s->clearEntityMaterialDesc(id);
+  waitJobAndComplete(h, *s, mark);
+  CHECK(netSince() == 0);
+
+  mark = h.jobs.size();
+  s->setEntityMaterialDesc(id, desc);
+  waitJobAndComplete(h, *s, mark);
+  CHECK(netSince() == 1);
+  mark = h.jobs.size();
+  s->undo(); // clears override
+  waitJobAndComplete(h, *s, mark);
+  CHECK(netSince() == 0);
+
+  mark = h.jobs.size();
+  s->setEntityMaterialDesc(id, desc);
+  waitJobAndComplete(h, *s, mark);
+  CHECK(netSince() == 1);
+  mark = h.jobs.size();
+  s->destroyEntity(id);
+  waitJobAndComplete(h, *s, mark);
+  CHECK(netSince() == 0);
+
+  s->pause();
+  completeAll(h, *s);
+  stop(*s, h);
+}
