@@ -45,7 +45,7 @@ void submitSessionFrame(lr::render::Renderer &renderer, lr::render::FrameDesc fr
                      qFatal("cannot report frame completion failure");
                    }
                  });
-  // associate keeps the frame completion tied to the session counting_scope.
-  lexec::spawn(lexec::associate(std::move(guarded), root.get_token()), root.get_token());
+  // spawn(token) already associates via token.wrap — no extra associate() (m5).
+  lexec::spawn(std::move(guarded), root.get_token());
 }
 } // namespace demo

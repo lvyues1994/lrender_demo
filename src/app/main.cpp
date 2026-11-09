@@ -28,6 +28,10 @@
 #include <lqtexec/EventLoopContext.h>
 #include <mutex>
 #include <optional>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <cstdlib>
 namespace demo {
 struct Bootstrap {
   std::unique_ptr<lr::runtime::Runtime> runtime;
@@ -1081,23 +1085,107 @@ struct Viewer : QObject {
 } // namespace demo
 
 namespace {
-// M4: black-flash requires a live, unlocked display. Lock/blank makes grabWindow
-// near-black and is not a product regression — skip with CTest code 77.
-bool displayLockedOrBlank(std::string *detail) {
-  // loginctl LockedHint
-  if (FILE *pipe = popen("loginctl show-session $(loginctl | awk '/seat0/{print $1; exit}') -p LockedHint 2>/dev/null", "r")) {
-    char buf[256] = {};
-    std::string out;
+// Resolve the loginctl session for *this* DISPLAY — never "first seat0".
+// Prefer $XDG_SESSION_ID; else match session Display to $DISPLAY; else the sole
+// active local x11/wayland session for the current uid.
+std::string resolveLogindSessionId() {
+  if (const char *id = std::getenv("XDG_SESSION_ID"); id && id[0])
+    return id;
+  std::string display = std::getenv("DISPLAY") ? std::getenv("DISPLAY") : "";
+  // Strip screen suffix (:1.0 → :1) for comparison.
+  auto bare = display;
+  if (auto dot = bare.find('.'); dot != std::string::npos)
+    bare.resize(dot);
+  std::string list;
+  if (FILE *pipe = popen("loginctl list-sessions --no-legend 2>/dev/null", "r")) {
+    char buf[256];
     while (fgets(buf, sizeof(buf), pipe))
-      out += buf;
+      list += buf;
     pclose(pipe);
-    if (out.find("LockedHint=yes") != std::string::npos) {
-      if (detail)
-        *detail = "loginctl LockedHint=yes (session locked)";
-      return true;
+  }
+  std::vector<std::string> ids;
+  {
+    std::istringstream ss(list);
+    std::string id, rest;
+    while (ss >> id) {
+      ids.push_back(id);
+      std::getline(ss, rest);
     }
   }
-  // xset q: only explicit monitor-off is treated as blank (DPMS enabled alone is normal).
+  std::string displayMatch;
+  std::vector<std::string> graphical;
+  for (auto const &id : ids) {
+    std::string cmd = "loginctl show-session " + id + " -p Display -p Type -p Class -p Active -p Remote 2>/dev/null";
+    std::string props;
+    if (FILE *pipe = popen(cmd.c_str(), "r")) {
+      char buf[256];
+      while (fgets(buf, sizeof(buf), pipe))
+        props += buf;
+      pclose(pipe);
+    }
+    auto grab = [&](char const *key) -> std::string {
+      auto k = std::string(key) + "=";
+      auto pos = props.find(k);
+      if (pos == std::string::npos)
+        return {};
+      auto end = props.find('\n', pos);
+      return props.substr(pos + k.size(), end == std::string::npos ? std::string::npos : end - pos - k.size());
+    };
+    auto sessDisplay = grab("Display");
+    auto type = grab("Type");
+    auto cls = grab("Class");
+    auto active = grab("Active");
+    auto remote = grab("Remote");
+    if (!bare.empty() && !sessDisplay.empty()) {
+      auto sd = sessDisplay;
+      if (auto dot = sd.find('.'); dot != std::string::npos)
+        sd.resize(dot);
+      if (sd == bare || sessDisplay == display)
+        displayMatch = id;
+    }
+    if (cls == "user" && remote != "yes" && (type == "x11" || type == "wayland") && active == "yes")
+      graphical.push_back(id);
+  }
+  if (!displayMatch.empty())
+    return displayMatch;
+  if (graphical.size() == 1)
+    return graphical.front();
+  return {};
+}
+
+// Black-flash requires a live, unlocked display. Lock/blank makes grabWindow
+// near-black and is not a product regression — skip with CTest code 77.
+// DEMO_FORCE_BLACK_FLASH_RUN=1 forces the run even when locked (manual/debug).
+// DEMO_FORCE_BLACK_FLASH_SKIP=1 always skips.
+bool displayLockedOrBlank(std::string *detail) {
+  if (const char *forceRun = std::getenv("DEMO_FORCE_BLACK_FLASH_RUN");
+      forceRun && forceRun[0] && forceRun[0] != '0')
+    return false;
+  if (const char *forceSkip = std::getenv("DEMO_FORCE_BLACK_FLASH_SKIP");
+      forceSkip && forceSkip[0] && forceSkip[0] != '0') {
+    if (detail)
+      *detail = "DEMO_FORCE_BLACK_FLASH_SKIP set";
+    return true;
+  }
+  auto session = resolveLogindSessionId();
+  if (!session.empty()) {
+    std::string cmd = "loginctl show-session " + session + " -p LockedHint 2>/dev/null";
+    std::string out;
+    if (FILE *pipe = popen(cmd.c_str(), "r")) {
+      char buf[256];
+      while (fgets(buf, sizeof(buf), pipe))
+        out += buf;
+      pclose(pipe);
+    }
+    if (out.find("LockedHint=yes") != std::string::npos) {
+      if (detail)
+        *detail = "loginctl session " + session + " LockedHint=yes (session locked)";
+      return true;
+    }
+  } else if (detail) {
+    // No resolvable session: still check monitor; note ambiguity in detail if blank.
+  }
+  // xset q against $DISPLAY: only explicit monitor-off counts as blank.
   if (FILE *pipe = popen("xset q 2>/dev/null", "r")) {
     char buf[512] = {};
     std::string out;
@@ -1107,13 +1195,6 @@ bool displayLockedOrBlank(std::string *detail) {
     if (out.find("Monitor is Off") != std::string::npos) {
       if (detail)
         *detail = "xset: Monitor is Off";
-      return true;
-    }
-  }
-  if (const char *force = std::getenv("DEMO_FORCE_BLACK_FLASH_SKIP")) {
-    if (force[0] && force[0] != '0') {
-      if (detail)
-        *detail = "DEMO_FORCE_BLACK_FLASH_SKIP set";
       return true;
     }
   }

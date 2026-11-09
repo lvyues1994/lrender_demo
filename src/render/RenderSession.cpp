@@ -253,22 +253,24 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     phase = Preparing;
     candidateGeneration = state.snapshot()->generation;
     auto self = shared_from_this();
-    adapter->preparePath(
-        selectedPath, {}, control([](Impl &s, auto result) {
+    // m4: preparePath via DoneOpSender + then_on (same Done contract as drain/release).
+    auto chain =
+        workflows::preparePathSender(*adapter, selectedPath, {}) |
+        lqtexec::then_on(drainHopScope(), [self](Result<std::monostate> result) {
           if (auto e = std::get_if<RenderError>(&result)) {
-            s.phase = Ready;
-            s.presentationError(*e);
+            self->phase = Ready;
+            self->presentationError(*e);
             return;
           }
-          if (s.stopRequested) {
-            s.phase = Ready;
-            s.queueTick();
+          if (self->stopRequested) {
+            self->phase = Ready;
+            self->queueTick();
             return;
           }
-          s.phase = Probing;
+          self->phase = Probing;
           auto once = std::make_shared<std::atomic<bool>>(false);
-          auto owner = std::make_shared<std::shared_ptr<Impl>>(s.shared_from_this());
-          s.adapter->probe(s.resources.renderer->deviceInfo(), [owner, once](auto result) {
+          auto owner = std::make_shared<std::shared_ptr<Impl>>(self);
+          self->adapter->probe(self->resources.renderer->deviceInfo(), [owner, once](auto result) {
             if (once->exchange(true))
               return;
             auto session = std::move(*owner);
@@ -320,7 +322,17 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
               }
             });
           });
-        }));
+        });
+    lexec::spawn(std::move(chain) | lexec::upon_error([self](std::exception_ptr) noexcept {
+                   // Hop to GUI: prepare faults stay in Ready + presentationError, not DrainFailed.
+                   post([self] {
+                     self->owner();
+                     self->phase = Ready;
+                     self->presentationError(
+                         issue(ErrorStage::Surface, "preparePath dispatch failed", "exception"));
+                   });
+                 }),
+                 root.get_token());
   }
   bool bindFreshTarget() {
     if (stopRequested || !area() || !visible || !pathPrepared)

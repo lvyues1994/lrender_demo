@@ -1,87 +1,95 @@
 diff --git a/.superpowers/sdd/E1-report.md b/.superpowers/sdd/E1-report.md
 new file mode 100644
-index 0000000..6ae85ac
+index 0000000..70f6498
 --- /dev/null
 +++ b/.superpowers/sdd/E1-report.md
-@@ -0,0 +1,78 @@
-+# E1 — lexec sender 工作流（复核补齐）
+@@ -0,0 +1,86 @@
++# E1 — lexec sender 工作流（m1–m6 验收补齐）
 +
 +- **Branch:** `feat/qt-vulkan-demo`
 +- **BASE:** `80528df881d0c1f5c22d8c26f7e11221d986bbaa`
-+- **HEAD:** feat/qt-vulkan-demo tip — run `git rev-parse HEAD`
-+- **Asia/Shanghai:** 2026-11-09T16:45:00+08:00
++- **Parent (本提交之前):** `6d3c6fa785426ced605b2c4bd3cc648f132d46bb`
++- **HEAD:** 本提交 tip — `git rev-parse HEAD`（含本报告的那次 ordinary commit）
++- **Asia/Shanghai:** 2026-11-09T17:01:00+08:00
 +
-+## 范围完成情况
++## m1–m6 修改
 +
 +| 项 | 状态 |
 +|----|------|
-+| Soft：`drain \| then_on(GUI, destroy+bind)`，不 release | 完成 |
-+| Hard：`drain \| then_on(destroy) \| release \| then_on(create/finish-stop)` | 完成 |
-+| upon_error → GUI hop（M1） | 完成 `guiDrainFault` |
-+| DoneOpSender stop 时仍 set_value(cancelled)（M2） | 完成 |
-+| workflow 覆盖 hard/soft/错误/取消/early-return（M3） | 完成 6 用例 |
-+| 黑帧锁屏/息屏 → exit 77 + CTest SKIP（M4） | 完成 |
-+| AssetLoader：`associate` + 既有 `write_env` 取消 | 完成 |
-+| SessionFrameSubmit：`associate` | 完成 |
-+| 加载/管线切换值命令 | 保持 latest-wins（A1.6）；取消走 LoadTicket/`write_env` stop |
-+| `lexec::stop_when` 公共 API | **上游未导出**（见局限） |
++| m1 锁屏检测用 `$XDG_SESSION_ID` / `$DISPLAY` 匹配，不用 seat0 首会话 | 完成 `resolveLogindSessionId` |
++| m2 `DEMO_FORCE_BLACK_FLASH_RUN` + `scripts/acceptance_gpu.sh` | 完成 |
++| m3 M2 措辞：取消 → `DrainFailed` fail-closed，不是继续关机 | 完成（注释+报告；行为未改） |
++| m4 `preparePathSender` 接入 `prepare()` | 完成 |
++| m5 去掉重复 `associate`（`spawn(token)` 已 `token.wrap`） | 完成 AssetLoader / SessionFrameSubmit |
++| m6 报告写真实 parent SHA；workflow ×6；断言实测 | 见证据 |
 +
-+## 屏幕状态（只读，验收前）
++## 验收脚本 `scripts/acceptance_gpu.sh`
++
++- 启动前检查锁屏/息屏（同 m1 会话解析）；锁定则 exit 2「未完成」
++- 黑帧 ×3 → DPR1.25 → cycle → 5 负例（submit_fault / fault_load / fault_present / zero_shared / strict_offscreen）
++- 任一项 SKIP → 未完成（exit 2）
++- 汇总 blackSamples / hostChanges / sharedShownGap / latency / sharedShown / resize capture
++- E2–E8 可复用（`DEMO_BUILD_DIR`）
++
++## 屏幕状态（验收前只读）
 +
 +```
-+loginctl session 2: LockedHint=yes IdleHint=yes Active=yes
-+xset: DPMS Enabled, Monitor is Off
++session 2: LockedHint=no IdleHint=no Active=yes Display=
++xset: DPMS Enabled, Monitor is On
++gdbus ScreenSaver.GetActive = false
++DISPLAY=:1
 +```
 +
-+黑帧自测：`exit 77`，明确 SKIP 文案。
-+**等待解锁后重跑验收：黑帧 ×3、DPR1.25、负例。**（本轮未尝试解锁）
-+
-+锁屏下仍作为功能证据跑通：`e2e_shared_cycle`、`e2e_shared_dpr125`、unit、负例等。
++已解锁亮屏 → 直接跑验收脚本。
 +
 +## 证据
 +
 +### 二进制 mtime（Asia/Shanghai）
 +
 +```
-+lrender_demo  2026-11-09 16:44:04 +0800
-+demo_e2e      2026-11-09 16:44:04 +0800
-+demo_tests    2026-11-09 16:44:01 +0800
++libdemo_core.a  2026-11-09 16:59:54 +0800
++demo_tests      2026-11-09 16:59:58 +0800
++lrender_demo    2026-11-09 16:59:58 +0800
++demo_e2e        2026-11-09 16:59:58 +0800
 +```
 +
 +### 单测
 +
-+- `QT_QPA_PLATFORM=offscreen demo_tests --no-skip=true`
-+- **171/171** passed，**6591** assertions（含 workflow/* ×6）
-+- 日志：`/tmp/e1i1-unit2.log`
++- `QT_QPA_PLATFORM=offscreen ./demo_tests`
++- **171/171** passed，**6590** assertions
++- workflow：`*workflow*` → **6** cases，**43** assertions
++- 日志：`/tmp/e1-m-unit.log`
 +
-+### CTest
++### CTest（完整）
 +
-+- **27 tests：100% passed，1 skipped**（`e2e_shared_black_flash` SKIP 77）
-+- 含 DPR `e2e_shared_dpr125` Passed；负例标签通过
-+- 日志：`/tmp/e1i1-ctest.log`
++- **27/27** passed（含 `e2e_shared_black_flash` Passed，无 SKIP）
++- 日志：`/tmp/e1-m-ctest.log`
 +
-+## 上游 API 证据：`stop_when`
++### acceptance_gpu.sh
 +
-+- 文件：`third_party/lexec/include/lexec/algorithms/stop_when.hpp`
-+- `stop_when` 定义在 **`namespace lexec::detail`**（约 L17–L146），**未** `using`/`inline constexpr` 到 `lexec::`
-+- 公共取消路径：`write_env` + `prop{get_stop_token, …}`（AssetLoader 已用）；`spawn` 内部使用 `detail::stop_when`
-+- **未**调用 `lexec::detail::stop_when`（避免依赖 detail）
++- **ACCEPTANCE COMPLETE**（exit 0）
++- 日志：`/tmp/e1-m-acceptance.log`
++- 黑帧 ×3：全部 `blackSamples=0`，`hostChanges=0`，`sharedShownGap=0`；resize capture `220x160`
++- DPR1.25：sharedShown≈230；cycle：sharedShown≈295
++- 5 负例：全部 PASS（expect_failure）
++
++## 上游 API：`stop_when`
++
++- 仍仅 `lexec::detail::stop_when`；取消用 `write_env` + stop token；`spawn` 内部 wrap，不再双重 `associate`
 +
 +## 保持的保证
 +
-+不阻塞 GUI；soft 不 release（不闪黑）；hard 序 drain→destroy→release；drain/release 错误 fail-closed 保留 target；GUI 独占状态；值命令/不可变快照。
++不阻塞 GUI；soft 不 release；hard 序 drain→destroy→release；取消/错误 → DrainFailed fail-closed 保留 target；GUI 独占状态；值命令/不可变快照。
 +
 +## 已知局限
 +
-+1. 黑帧验收待解锁后重跑 ×3（本轮 SKIP）。
-+2. `lexec::stop_when` 无公共导出；取消用 `write_env` stop token。
-+3. RenderSession 仍偏大；soft/hard 已收敛到 workflows + `then_on`，prepare/install 小步仍在 tick 内（符合 GUI 有界安装）。
-+4. `.superpowers/` 在 `.gitignore`；本报告因此前已跟踪而可普通 `git add`（M5：不再 `-f` 强制新报告）。
++1. `lexec::stop_when` 无公共导出。
++2. RenderSession 仍偏大；prepare 已 sender 化，probe 仍为 Done 回调。
++3. `.superpowers/` 若在 ignore 列表则勿 `-f`；本路径此前已跟踪。
 +
 +## 未做
 +
-+未 push/amend/改第三方/动桌面解锁；未开始 E2。
-+
++未 push / amend / 改第三方 / 动 `.vscode` / 解锁操作（本轮已自行解锁）；未开始 E2。
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 2c2e7c2..43ddd12 100644
 --- a/CMakeLists.txt
@@ -102,33 +110,325 @@ index 2c2e7c2..43ddd12 100644
   set_tests_properties(e2e_shared_dpr125 PROPERTIES ENVIRONMENT "QT_SCALE_FACTOR=1.25;DEMO_LOG_SOFT_EXTENT=1")
   set_tests_properties(e2e_shared_cycle e2e_shared_black_flash e2e_gpu_readback PROPERTIES ENVIRONMENT "DEMO_LOG_SOFT_EXTENT=1")
   add_test(NAME e2e_strict_offscreen COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/expect_failure.py" "session error:" $<TARGET_FILE:demo_e2e> --backend vulkan --presentation shared --scenario resize --frames 4)
+diff --git a/scripts/acceptance_gpu.sh b/scripts/acceptance_gpu.sh
+new file mode 100755
+index 0000000..a89a12f
+--- /dev/null
++++ b/scripts/acceptance_gpu.sh
+@@ -0,0 +1,191 @@
++#!/usr/bin/env bash
++# Reusable GPU acceptance for E1–E8.
++# Incomplete (exit 2) if display locked/blank OR any case SKIP.
++# Fail (exit 1) if any case FAIL.
++set -uo pipefail
++
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"
++BUILD="${DEMO_BUILD_DIR:-$ROOT/build}"
++CTEST_BIN="${CTEST_BIN:-ctest}"
++
++red() { printf '\033[31m%s\033[0m\n' "$*"; }
++green() { printf '\033[32m%s\033[0m\n' "$*"; }
++yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
++
++resolve_session() {
++  if [[ -n "${XDG_SESSION_ID:-}" ]]; then
++    echo "$XDG_SESSION_ID"
++    return
++  fi
++  local display="${DISPLAY:-}"
++  local bare="${display%%.*}"
++  local id match=""
++  local -a graphical=()
++  while read -r id _; do
++    [[ -z "$id" ]] && continue
++    local props
++    props="$(loginctl show-session "$id" -p Display -p Type -p Class -p Active -p Remote 2>/dev/null || true)"
++    local sess_display type class active remote
++    sess_display="$(printf '%s\n' "$props" | sed -n 's/^Display=//p')"
++    type="$(printf '%s\n' "$props" | sed -n 's/^Type=//p')"
++    class="$(printf '%s\n' "$props" | sed -n 's/^Class=//p')"
++    active="$(printf '%s\n' "$props" | sed -n 's/^Active=//p')"
++    remote="$(printf '%s\n' "$props" | sed -n 's/^Remote=//p')"
++    local sd="${sess_display%%.*}"
++    if [[ -n "$bare" && -n "$sess_display" && ( "$sd" == "$bare" || "$sess_display" == "$display" ) ]]; then
++      match="$id"
++    fi
++    if [[ "$class" == "user" && "$remote" != "yes" && ( "$type" == "x11" || "$type" == "wayland" ) && "$active" == "yes" ]]; then
++      graphical+=("$id")
++    fi
++  done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
++  if [[ -n "$match" ]]; then
++    echo "$match"
++    return
++  fi
++  if [[ ${#graphical[@]} -eq 1 ]]; then
++    echo "${graphical[0]}"
++    return
++  fi
++  echo ""
++}
++
++screen_locked_or_blank() {
++  local session
++  session="$(resolve_session)"
++  if [[ -n "$session" ]]; then
++    local hint
++    hint="$(loginctl show-session "$session" -p LockedHint 2>/dev/null || true)"
++    if [[ "$hint" == *LockedHint=yes* ]]; then
++      echo "loginctl session $session LockedHint=yes"
++      return 0
++    fi
++  fi
++  local xq
++  xq="$(xset q 2>/dev/null || true)"
++  if [[ "$xq" == *"Monitor is Off"* ]]; then
++    echo "xset: Monitor is Off"
++    return 0
++  fi
++  return 1
++}
++
++echo "=== acceptance_gpu.sh (E1–E8 reusable) ==="
++echo "ROOT=$ROOT BUILD=$BUILD"
++echo "DISPLAY=${DISPLAY:-} XDG_SESSION_ID=${XDG_SESSION_ID:-}"
++echo "session=$(resolve_session)"
++
++detail=""
++if detail="$(screen_locked_or_blank)"; then
++  red "INCOMPLETE: display locked or blank — $detail"
++  red "Waiting for unlock. Do not treat this run as acceptance."
++  exit 2
++fi
++green "display unlocked and monitor on"
++
++if [[ ! -d "$BUILD" ]]; then
++  red "INCOMPLETE: build dir missing: $BUILD"
++  exit 2
++fi
++
++LOG_DIR="${TMPDIR:-/tmp}/acceptance_gpu_$$"
++mkdir -p "$LOG_DIR"
++trap 'rm -rf "$LOG_DIR"' EXIT
++
++failed=0
++skipped=0
++
++run_ctest() {
++  local name="$1"
++  local log="$LOG_DIR/$name.log"
++  yellow ">> $name"
++  local rc=0
++  "$CTEST_BIN" --test-dir "$BUILD" -R "^${name}$" --output-on-failure -V >"$log" 2>&1 || rc=$?
++
++  if grep -Eq '^\s*[0-9]+/[0-9]+ Test\s+#.+:.+(Skipped|\*\*\*Skipped)' "$log" \
++     || grep -Eq 'SKIP_RETURN_CODE|black-flash SKIP|exit code[: ]+77' "$log"; then
++    red "INCOMPLETE: $name SKIPPED"
++    tail -40 "$log"
++    skipped=1
++    return 0
++  fi
++  if [[ $rc -ne 0 ]]; then
++    red "FAIL: $name (ctest exit=$rc)"
++    tail -60 "$log"
++    failed=1
++    return 0
++  fi
++  # Also treat "No tests were found" as fail
++  if grep -Eq 'No tests were found|0 tests failed out of 0' "$log" && ! grep -Eq '1/1 Test' "$log"; then
++    # ctest with -R miss returns 0 sometimes with 0 tests
++    if ! grep -Eq 'Test #|1/1 Test' "$log"; then
++      red "FAIL: $name — no matching test"
++      failed=1
++      return 0
++    fi
++  fi
++  green "PASS: $name"
++  grep -E 'blackSamples|hostChanges|sharedShownGap|latency|sharedShown|resize capture|Resize capture|host change|black-flash|DPR' "$log" \
++    | tee -a "$LOG_DIR/metrics.txt" >/dev/null || true
++  return 0
++}
++
++echo
++echo "--- black-flash ×3 ---"
++for i in 1 2 3; do
++  # Distinct log names so scrapes keep all runs
++  yellow ">> e2e_shared_black_flash ($i/3)"
++  log="$LOG_DIR/e2e_shared_black_flash_$i.log"
++  rc=0
++  "$CTEST_BIN" --test-dir "$BUILD" -R '^e2e_shared_black_flash$' --output-on-failure -V >"$log" 2>&1 || rc=$?
++  if grep -Eq '^\s*[0-9]+/[0-9]+ Test\s+#.+:.+(Skipped|\*\*\*Skipped)' "$log" \
++     || grep -Eq 'SKIP_RETURN_CODE|black-flash SKIP|exit code[: ]+77' "$log"; then
++    red "INCOMPLETE: e2e_shared_black_flash ($i/3) SKIPPED"
++    tail -40 "$log"
++    skipped=1
++  elif [[ $rc -ne 0 ]]; then
++    red "FAIL: e2e_shared_black_flash ($i/3) (ctest exit=$rc)"
++    tail -60 "$log"
++    failed=1
++  else
++    green "PASS: e2e_shared_black_flash ($i/3)"
++    grep -E 'blackSamples|hostChanges|sharedShownGap|latency|sharedShown|resize capture|Resize capture|host change|black-flash' "$log" \
++      | tee -a "$LOG_DIR/metrics.txt" >/dev/null || true
++  fi
++done
++
++echo
++echo "--- DPR1.25 ---"
++run_ctest e2e_shared_dpr125
++
++echo
++echo "--- cycle ---"
++run_ctest e2e_shared_cycle
++
++echo
++echo "--- 5 negatives ---"
++for name in e2e_submit_fault e2e_fault_load e2e_fault_present e2e_zero_shared e2e_strict_offscreen; do
++  run_ctest "$name"
++done
++
++echo
++echo "=== SUMMARY METRICS ==="
++if [[ -f "$LOG_DIR/metrics.txt" ]]; then
++  cat "$LOG_DIR/metrics.txt"
++else
++  yellow "(no metric lines captured)"
++fi
++echo "--- scraped ---"
++grep -hE 'blackSamples|hostChanges|sharedShownGap|latency|sharedShown|resize capture|Resize capture' "$LOG_DIR"/*.log 2>/dev/null | sort -u || true
++
++echo
++if [[ $skipped -ne 0 ]]; then
++  red "INCOMPLETE: at least one case SKIPPED — not an acceptance run"
++  exit 2
++fi
++if [[ $failed -ne 0 ]]; then
++  red "FAIL: at least one case failed"
++  exit 1
++fi
++green "ACCEPTANCE COMPLETE"
++exit 0
 diff --git a/src/app/main.cpp b/src/app/main.cpp
-index 530b956..1e9fdd2 100644
+index 530b956..9b93629 100644
 --- a/src/app/main.cpp
 +++ b/src/app/main.cpp
-@@ -1079,6 +1079,47 @@ struct Viewer : QObject {
+@@ -28,6 +28,10 @@
+ #include <lqtexec/EventLoopContext.h>
+ #include <mutex>
+ #include <optional>
++#include <sstream>
++#include <string>
++#include <vector>
++#include <cstdlib>
+ namespace demo {
+ struct Bootstrap {
+   std::unique_ptr<lr::runtime::Runtime> runtime;
+@@ -1079,6 +1083,124 @@ struct Viewer : QObject {
    }
  };
  } // namespace demo
 +
 +namespace {
-+// M4: black-flash requires a live, unlocked display. Lock/blank makes grabWindow
-+// near-black and is not a product regression — skip with CTest code 77.
-+bool displayLockedOrBlank(std::string *detail) {
-+  // loginctl LockedHint
-+  if (FILE *pipe = popen("loginctl show-session $(loginctl | awk '/seat0/{print $1; exit}') -p LockedHint 2>/dev/null", "r")) {
-+    char buf[256] = {};
-+    std::string out;
++// Resolve the loginctl session for *this* DISPLAY — never "first seat0".
++// Prefer $XDG_SESSION_ID; else match session Display to $DISPLAY; else the sole
++// active local x11/wayland session for the current uid.
++std::string resolveLogindSessionId() {
++  if (const char *id = std::getenv("XDG_SESSION_ID"); id && id[0])
++    return id;
++  std::string display = std::getenv("DISPLAY") ? std::getenv("DISPLAY") : "";
++  // Strip screen suffix (:1.0 → :1) for comparison.
++  auto bare = display;
++  if (auto dot = bare.find('.'); dot != std::string::npos)
++    bare.resize(dot);
++  std::string list;
++  if (FILE *pipe = popen("loginctl list-sessions --no-legend 2>/dev/null", "r")) {
++    char buf[256];
 +    while (fgets(buf, sizeof(buf), pipe))
-+      out += buf;
++      list += buf;
 +    pclose(pipe);
-+    if (out.find("LockedHint=yes") != std::string::npos) {
-+      if (detail)
-+        *detail = "loginctl LockedHint=yes (session locked)";
-+      return true;
++  }
++  std::vector<std::string> ids;
++  {
++    std::istringstream ss(list);
++    std::string id, rest;
++    while (ss >> id) {
++      ids.push_back(id);
++      std::getline(ss, rest);
 +    }
 +  }
-+  // xset q: only explicit monitor-off is treated as blank (DPMS enabled alone is normal).
++  std::string displayMatch;
++  std::vector<std::string> graphical;
++  for (auto const &id : ids) {
++    std::string cmd = "loginctl show-session " + id + " -p Display -p Type -p Class -p Active -p Remote 2>/dev/null";
++    std::string props;
++    if (FILE *pipe = popen(cmd.c_str(), "r")) {
++      char buf[256];
++      while (fgets(buf, sizeof(buf), pipe))
++        props += buf;
++      pclose(pipe);
++    }
++    auto grab = [&](char const *key) -> std::string {
++      auto k = std::string(key) + "=";
++      auto pos = props.find(k);
++      if (pos == std::string::npos)
++        return {};
++      auto end = props.find('\n', pos);
++      return props.substr(pos + k.size(), end == std::string::npos ? std::string::npos : end - pos - k.size());
++    };
++    auto sessDisplay = grab("Display");
++    auto type = grab("Type");
++    auto cls = grab("Class");
++    auto active = grab("Active");
++    auto remote = grab("Remote");
++    if (!bare.empty() && !sessDisplay.empty()) {
++      auto sd = sessDisplay;
++      if (auto dot = sd.find('.'); dot != std::string::npos)
++        sd.resize(dot);
++      if (sd == bare || sessDisplay == display)
++        displayMatch = id;
++    }
++    if (cls == "user" && remote != "yes" && (type == "x11" || type == "wayland") && active == "yes")
++      graphical.push_back(id);
++  }
++  if (!displayMatch.empty())
++    return displayMatch;
++  if (graphical.size() == 1)
++    return graphical.front();
++  return {};
++}
++
++// Black-flash requires a live, unlocked display. Lock/blank makes grabWindow
++// near-black and is not a product regression — skip with CTest code 77.
++// DEMO_FORCE_BLACK_FLASH_RUN=1 forces the run even when locked (manual/debug).
++// DEMO_FORCE_BLACK_FLASH_SKIP=1 always skips.
++bool displayLockedOrBlank(std::string *detail) {
++  if (const char *forceRun = std::getenv("DEMO_FORCE_BLACK_FLASH_RUN");
++      forceRun && forceRun[0] && forceRun[0] != '0')
++    return false;
++  if (const char *forceSkip = std::getenv("DEMO_FORCE_BLACK_FLASH_SKIP");
++      forceSkip && forceSkip[0] && forceSkip[0] != '0') {
++    if (detail)
++      *detail = "DEMO_FORCE_BLACK_FLASH_SKIP set";
++    return true;
++  }
++  auto session = resolveLogindSessionId();
++  if (!session.empty()) {
++    std::string cmd = "loginctl show-session " + session + " -p LockedHint 2>/dev/null";
++    std::string out;
++    if (FILE *pipe = popen(cmd.c_str(), "r")) {
++      char buf[256];
++      while (fgets(buf, sizeof(buf), pipe))
++        out += buf;
++      pclose(pipe);
++    }
++    if (out.find("LockedHint=yes") != std::string::npos) {
++      if (detail)
++        *detail = "loginctl session " + session + " LockedHint=yes (session locked)";
++      return true;
++    }
++  } else if (detail) {
++    // No resolvable session: still check monitor; note ambiguity in detail if blank.
++  }
++  // xset q against $DISPLAY: only explicit monitor-off counts as blank.
 +  if (FILE *pipe = popen("xset q 2>/dev/null", "r")) {
 +    char buf[512] = {};
 +    std::string out;
@@ -141,20 +441,13 @@ index 530b956..1e9fdd2 100644
 +      return true;
 +    }
 +  }
-+  if (const char *force = std::getenv("DEMO_FORCE_BLACK_FLASH_SKIP")) {
-+    if (force[0] && force[0] != '0') {
-+      if (detail)
-+        *detail = "DEMO_FORCE_BLACK_FLASH_SKIP set";
-+      return true;
-+    }
-+  }
 +  return false;
 +}
 +} // namespace
  int main(int argc, char **argv) {
    QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
    QApplication app(argc, argv);
-@@ -1138,8 +1179,19 @@ int main(int argc, char **argv) {
+@@ -1138,8 +1260,19 @@ int main(int argc, char **argv) {
      std::cerr << "asset root error: " << e.what() << std::endl;
      return 1;
    }
@@ -176,7 +469,7 @@ index 530b956..1e9fdd2 100644
  #ifdef DEMO_E2E
    auto scenario = args.value("scenario").toStdString();
 diff --git a/src/assets/AssetLoader.cpp b/src/assets/AssetLoader.cpp
-index 9b725d2..b55f9b0 100644
+index 9b725d2..c7f7b37 100644
 --- a/src/assets/AssetLoader.cpp
 +++ b/src/assets/AssetLoader.cpp
 @@ -147,6 +147,9 @@ LoadTicket AssetLoader::beginLoad(AssetEntry entry, AssetRequestId request,
@@ -184,22 +477,13 @@ index 9b725d2..b55f9b0 100644
      self->deliver(r, std::move(value));
    };
 +  // Cancel: public API is write_env(get_stop_token) on `work` above.
-+  // lexec::stop_when exists only as lexec::detail::stop_when (algorithms/stop_when.hpp);
-+  // not exported to namespace lexec — see E1 report. associate ties load to app scope.
++  // lexec::stop_when exists only as lexec::detail::stop_when (not exported to lexec::).
++  // spawn(token) already wraps via token.wrap — do not also associate() (m5).
    auto hopped = lqtexec::then_on(std::move(work), *self->completion, receipt) |
                  lexec::upon_stopped([self, r]() noexcept {
                    self->deliver(r, {r->id, LoadStatus::Cancelled, {}, {}});
-@@ -164,7 +167,7 @@ LoadTicket AssetLoader::beginLoad(AssetEntry entry, AssetRequestId request,
-                     }}; // allocate before producer starts
-   ++self->count;
-   try {
--    lexec::spawn(std::move(hopped), self->root);
-+    lexec::spawn(lexec::associate(std::move(hopped), self->root), self->root);
-   } catch (...) {
-     --self->count;
-     throw;
 diff --git a/src/render/RenderSession.cpp b/src/render/RenderSession.cpp
-index 0c91cc6..8dfb64d 100644
+index 0c91cc6..c7e8165 100644
 --- a/src/render/RenderSession.cpp
 +++ b/src/render/RenderSession.cpp
 @@ -3,6 +3,7 @@
@@ -236,7 +520,61 @@ index 0c91cc6..8dfb64d 100644
    void presentationError(RenderError error) {
      if (selectedPath == PresentationPath::VulkanShared && allowFallback && !stopRequested) {
        presentationWarnings.push_back(error.message + ": " + error.cause);
-@@ -357,14 +377,24 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
+@@ -233,22 +253,24 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
+     phase = Preparing;
+     candidateGeneration = state.snapshot()->generation;
+     auto self = shared_from_this();
+-    adapter->preparePath(
+-        selectedPath, {}, control([](Impl &s, auto result) {
++    // m4: preparePath via DoneOpSender + then_on (same Done contract as drain/release).
++    auto chain =
++        workflows::preparePathSender(*adapter, selectedPath, {}) |
++        lqtexec::then_on(drainHopScope(), [self](Result<std::monostate> result) {
+           if (auto e = std::get_if<RenderError>(&result)) {
+-            s.phase = Ready;
+-            s.presentationError(*e);
++            self->phase = Ready;
++            self->presentationError(*e);
+             return;
+           }
+-          if (s.stopRequested) {
+-            s.phase = Ready;
+-            s.queueTick();
++          if (self->stopRequested) {
++            self->phase = Ready;
++            self->queueTick();
+             return;
+           }
+-          s.phase = Probing;
++          self->phase = Probing;
+           auto once = std::make_shared<std::atomic<bool>>(false);
+-          auto owner = std::make_shared<std::shared_ptr<Impl>>(s.shared_from_this());
+-          s.adapter->probe(s.resources.renderer->deviceInfo(), [owner, once](auto result) {
++          auto owner = std::make_shared<std::shared_ptr<Impl>>(self);
++          self->adapter->probe(self->resources.renderer->deviceInfo(), [owner, once](auto result) {
+             if (once->exchange(true))
+               return;
+             auto session = std::move(*owner);
+@@ -300,7 +322,17 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
+               }
+             });
+           });
+-        }));
++        });
++    lexec::spawn(std::move(chain) | lexec::upon_error([self](std::exception_ptr) noexcept {
++                   // Hop to GUI: prepare faults stay in Ready + presentationError, not DrainFailed.
++                   post([self] {
++                     self->owner();
++                     self->phase = Ready;
++                     self->presentationError(
++                         issue(ErrorStage::Surface, "preparePath dispatch failed", "exception"));
++                   });
++                 }),
++                 root.get_token());
+   }
+   bool bindFreshTarget() {
+     if (stopRequested || !area() || !visible || !pathPrepared)
+@@ -357,14 +389,24 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
      };
      if (selectedPath == PresentationPath::VulkanShared) {
        phase = Draining;
@@ -269,7 +607,7 @@ index 0c91cc6..8dfb64d 100644
        return;
      }
      finish();
-@@ -387,39 +417,55 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
+@@ -387,39 +429,55 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
      receiptWaitMs = 0;
      receiptWaitStarted.reset();
      phase = Draining;
@@ -350,7 +688,7 @@ index 0c91cc6..8dfb64d 100644
    void destroyResources(bool ambiguousBarrier) {
      phase = Destroying;
 diff --git a/src/render/SessionFrameSubmit.cpp b/src/render/SessionFrameSubmit.cpp
-index 0600c69..5d25186 100644
+index 0600c69..71b463b 100644
 --- a/src/render/SessionFrameSubmit.cpp
 +++ b/src/render/SessionFrameSubmit.cpp
 @@ -28,23 +28,24 @@ void submitSessionFrame(lr::render::Renderer &renderer, lr::render::FrameDesc fr
@@ -389,16 +727,16 @@ index 0600c69..5d25186 100644
 +                     qFatal("cannot report frame completion failure");
 +                   }
 +                 });
-+  // associate keeps the frame completion tied to the session counting_scope.
-+  lexec::spawn(lexec::associate(std::move(guarded), root.get_token()), root.get_token());
++  // spawn(token) already associates via token.wrap — no extra associate() (m5).
++  lexec::spawn(std::move(guarded), root.get_token());
  }
  } // namespace demo
 diff --git a/src/render/workflows/AdapterSenders.h b/src/render/workflows/AdapterSenders.h
 new file mode 100644
-index 0000000..a877e98
+index 0000000..d2b9324
 --- /dev/null
 +++ b/src/render/workflows/AdapterSenders.h
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,93 @@
 +#pragma once
 +
 +#include "presentation/PresentationAdapter.h"
@@ -414,7 +752,8 @@ index 0000000..a877e98
 +
 +// Done callbacks become set_value(Result). No set_error channel (spawn-friendly).
 +// M2: when the stop token is already requested at Done time, still deliver a value
-+// (cancelled RenderError) so drain/release pipelines can leave Draining and converge.
++// (cancelled RenderError) so then_on can leave Draining and enter DrainFailed
++// (fail-closed retain). This is NOT "continue shutdown" — shutdown retry is explicit.
 +// Adapters must always invoke Done exactly once on every beginDrain/releasePath path.
 +struct DoneOpSender {
 +  using sender_concept = lexec::sender_t;
@@ -439,8 +778,8 @@ index 0000000..a877e98
 +          try {
 +            auto token = lexec::get_stop_token(lexec::get_env(rcvr));
 +            if (token.stop_requested()) {
-+              // Prefer value completion with a cancelled error so then_on / let_value
-+              // handlers run and can fail-closed / continue shutdown. Dropping the
++              // Prefer value completion with a cancelled error so then_on handlers
++              // run and fail-closed into DrainFailed (retain target). Dropping the
 +              // Result via set_stopped alone left phase==Draining and root.join hung.
 +              lexec::set_value(static_cast<Rcvr &&>(rcvr),
 +                               Result<std::monostate>{RenderError{

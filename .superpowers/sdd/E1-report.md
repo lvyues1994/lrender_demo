@@ -1,78 +1,86 @@
-# E1 — lexec sender 工作流（复核补齐）
+# E1 — lexec sender 工作流（m1–m6 验收补齐）
 
 - **Branch:** `feat/qt-vulkan-demo`
 - **BASE:** `80528df881d0c1f5c22d8c26f7e11221d986bbaa`
-- **HEAD:** feat/qt-vulkan-demo tip — run `git rev-parse HEAD`
-- **Asia/Shanghai:** 2026-11-09T16:45:00+08:00
+- **Parent (本提交之前):** `6d3c6fa785426ced605b2c4bd3cc648f132d46bb`
+- **HEAD:** 本提交 tip — `git rev-parse HEAD`（含本报告的那次 ordinary commit）
+- **Asia/Shanghai:** 2026-11-09T17:01:00+08:00
 
-## 范围完成情况
+## m1–m6 修改
 
 | 项 | 状态 |
 |----|------|
-| Soft：`drain \| then_on(GUI, destroy+bind)`，不 release | 完成 |
-| Hard：`drain \| then_on(destroy) \| release \| then_on(create/finish-stop)` | 完成 |
-| upon_error → GUI hop（M1） | 完成 `guiDrainFault` |
-| DoneOpSender stop 时仍 set_value(cancelled)（M2） | 完成 |
-| workflow 覆盖 hard/soft/错误/取消/early-return（M3） | 完成 6 用例 |
-| 黑帧锁屏/息屏 → exit 77 + CTest SKIP（M4） | 完成 |
-| AssetLoader：`associate` + 既有 `write_env` 取消 | 完成 |
-| SessionFrameSubmit：`associate` | 完成 |
-| 加载/管线切换值命令 | 保持 latest-wins（A1.6）；取消走 LoadTicket/`write_env` stop |
-| `lexec::stop_when` 公共 API | **上游未导出**（见局限） |
+| m1 锁屏检测用 `$XDG_SESSION_ID` / `$DISPLAY` 匹配，不用 seat0 首会话 | 完成 `resolveLogindSessionId` |
+| m2 `DEMO_FORCE_BLACK_FLASH_RUN` + `scripts/acceptance_gpu.sh` | 完成 |
+| m3 M2 措辞：取消 → `DrainFailed` fail-closed，不是继续关机 | 完成（注释+报告；行为未改） |
+| m4 `preparePathSender` 接入 `prepare()` | 完成 |
+| m5 去掉重复 `associate`（`spawn(token)` 已 `token.wrap`） | 完成 AssetLoader / SessionFrameSubmit |
+| m6 报告写真实 parent SHA；workflow ×6；断言实测 | 见证据 |
 
-## 屏幕状态（只读，验收前）
+## 验收脚本 `scripts/acceptance_gpu.sh`
+
+- 启动前检查锁屏/息屏（同 m1 会话解析）；锁定则 exit 2「未完成」
+- 黑帧 ×3 → DPR1.25 → cycle → 5 负例（submit_fault / fault_load / fault_present / zero_shared / strict_offscreen）
+- 任一项 SKIP → 未完成（exit 2）
+- 汇总 blackSamples / hostChanges / sharedShownGap / latency / sharedShown / resize capture
+- E2–E8 可复用（`DEMO_BUILD_DIR`）
+
+## 屏幕状态（验收前只读）
 
 ```
-loginctl session 2: LockedHint=yes IdleHint=yes Active=yes
-xset: DPMS Enabled, Monitor is Off
+session 2: LockedHint=no IdleHint=no Active=yes Display=
+xset: DPMS Enabled, Monitor is On
+gdbus ScreenSaver.GetActive = false
+DISPLAY=:1
 ```
 
-黑帧自测：`exit 77`，明确 SKIP 文案。
-**等待解锁后重跑验收：黑帧 ×3、DPR1.25、负例。**（本轮未尝试解锁）
-
-锁屏下仍作为功能证据跑通：`e2e_shared_cycle`、`e2e_shared_dpr125`、unit、负例等。
+已解锁亮屏 → 直接跑验收脚本。
 
 ## 证据
 
 ### 二进制 mtime（Asia/Shanghai）
 
 ```
-lrender_demo  2026-11-09 16:44:04 +0800
-demo_e2e      2026-11-09 16:44:04 +0800
-demo_tests    2026-11-09 16:44:01 +0800
+libdemo_core.a  2026-11-09 16:59:54 +0800
+demo_tests      2026-11-09 16:59:58 +0800
+lrender_demo    2026-11-09 16:59:58 +0800
+demo_e2e        2026-11-09 16:59:58 +0800
 ```
 
 ### 单测
 
-- `QT_QPA_PLATFORM=offscreen demo_tests --no-skip=true`
-- **171/171** passed，**6591** assertions（含 workflow/* ×6）
-- 日志：`/tmp/e1i1-unit2.log`
+- `QT_QPA_PLATFORM=offscreen ./demo_tests`
+- **171/171** passed，**6590** assertions
+- workflow：`*workflow*` → **6** cases，**43** assertions
+- 日志：`/tmp/e1-m-unit.log`
 
-### CTest
+### CTest（完整）
 
-- **27 tests：100% passed，1 skipped**（`e2e_shared_black_flash` SKIP 77）
-- 含 DPR `e2e_shared_dpr125` Passed；负例标签通过
-- 日志：`/tmp/e1i1-ctest.log`
+- **27/27** passed（含 `e2e_shared_black_flash` Passed，无 SKIP）
+- 日志：`/tmp/e1-m-ctest.log`
 
-## 上游 API 证据：`stop_when`
+### acceptance_gpu.sh
 
-- 文件：`third_party/lexec/include/lexec/algorithms/stop_when.hpp`
-- `stop_when` 定义在 **`namespace lexec::detail`**（约 L17–L146），**未** `using`/`inline constexpr` 到 `lexec::`
-- 公共取消路径：`write_env` + `prop{get_stop_token, …}`（AssetLoader 已用）；`spawn` 内部使用 `detail::stop_when`
-- **未**调用 `lexec::detail::stop_when`（避免依赖 detail）
+- **ACCEPTANCE COMPLETE**（exit 0）
+- 日志：`/tmp/e1-m-acceptance.log`
+- 黑帧 ×3：全部 `blackSamples=0`，`hostChanges=0`，`sharedShownGap=0`；resize capture `220x160`
+- DPR1.25：sharedShown≈230；cycle：sharedShown≈295
+- 5 负例：全部 PASS（expect_failure）
+
+## 上游 API：`stop_when`
+
+- 仍仅 `lexec::detail::stop_when`；取消用 `write_env` + stop token；`spawn` 内部 wrap，不再双重 `associate`
 
 ## 保持的保证
 
-不阻塞 GUI；soft 不 release（不闪黑）；hard 序 drain→destroy→release；drain/release 错误 fail-closed 保留 target；GUI 独占状态；值命令/不可变快照。
+不阻塞 GUI；soft 不 release；hard 序 drain→destroy→release；取消/错误 → DrainFailed fail-closed 保留 target；GUI 独占状态；值命令/不可变快照。
 
 ## 已知局限
 
-1. 黑帧验收待解锁后重跑 ×3（本轮 SKIP）。
-2. `lexec::stop_when` 无公共导出；取消用 `write_env` stop token。
-3. RenderSession 仍偏大；soft/hard 已收敛到 workflows + `then_on`，prepare/install 小步仍在 tick 内（符合 GUI 有界安装）。
-4. `.superpowers/` 在 `.gitignore`；本报告因此前已跟踪而可普通 `git add`（M5：不再 `-f` 强制新报告）。
+1. `lexec::stop_when` 无公共导出。
+2. RenderSession 仍偏大；prepare 已 sender 化，probe 仍为 Done 回调。
+3. `.superpowers/` 若在 ignore 列表则勿 `-f`；本路径此前已跟踪。
 
 ## 未做
 
-未 push/amend/改第三方/动桌面解锁；未开始 E2。
-
+未 push / amend / 改第三方 / 动 `.vscode` / 解锁操作（本轮已自行解锁）；未开始 E2。

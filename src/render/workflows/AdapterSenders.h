@@ -13,7 +13,8 @@ namespace demo::workflows {
 
 // Done callbacks become set_value(Result). No set_error channel (spawn-friendly).
 // M2: when the stop token is already requested at Done time, still deliver a value
-// (cancelled RenderError) so drain/release pipelines can leave Draining and converge.
+// (cancelled RenderError) so then_on can leave Draining and enter DrainFailed
+// (fail-closed retain). This is NOT "continue shutdown" — shutdown retry is explicit.
 // Adapters must always invoke Done exactly once on every beginDrain/releasePath path.
 struct DoneOpSender {
   using sender_concept = lexec::sender_t;
@@ -38,8 +39,8 @@ struct DoneOpSender {
           try {
             auto token = lexec::get_stop_token(lexec::get_env(rcvr));
             if (token.stop_requested()) {
-              // Prefer value completion with a cancelled error so then_on / let_value
-              // handlers run and can fail-closed / continue shutdown. Dropping the
+              // Prefer value completion with a cancelled error so then_on handlers
+              // run and fail-closed into DrainFailed (retain target). Dropping the
               // Result via set_stopped alone left phase==Draining and root.join hung.
               lexec::set_value(static_cast<Rcvr &&>(rcvr),
                                Result<std::monostate>{RenderError{
