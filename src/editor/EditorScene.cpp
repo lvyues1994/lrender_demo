@@ -66,11 +66,15 @@ entt::entity EditorScene::create(std::string name, lr::core::Transform local,
 
 void EditorScene::setName(entt::entity e, std::string name) {
   requireGui();
+  if (!registry_.valid(e))
+    throw std::invalid_argument("EditorScene: invalid entity");
   registry_.get<Name>(e).value = std::move(name);
 }
 
 void EditorScene::setLocalTransform(entt::entity e, lr::core::Transform local) {
   requireGui();
+  if (!registry_.valid(e))
+    throw std::invalid_argument("EditorScene: invalid entity");
   registry_.get<LocalTransform>(e).value = local;
   markDirty(e);
 }
@@ -92,6 +96,8 @@ void EditorScene::setParent(entt::entity e, std::optional<entt::entity> parent) 
 void EditorScene::setMeshMaterial(entt::entity e, lr::core::MeshId mesh,
                                   lr::core::MaterialId material) {
   requireGui();
+  if (!registry_.valid(e))
+    throw std::invalid_argument("EditorScene: invalid entity");
   registry_.emplace_or_replace<MeshRef>(e, MeshRef{mesh});
   registry_.emplace_or_replace<MaterialRef>(e, MaterialRef{material});
   markDirty(e);
@@ -120,16 +126,17 @@ void EditorScene::destroy(entt::entity e) {
   requireGui();
   if (!registry_.valid(e))
     return;
-  // CASCADE: remove entire subtree from registry. World cascade-destroys descendants
-  // when the root World entity is destroyed, so only queue the root's WorldLink.
+  // CASCADE in registry. Queue every node's WorldLink: unsynced reparents mean a
+  // child's World entity may not be a World-descendant of the destroyed root, so
+  // destroying only the root would orphan them (probe6). Flush uses isAlive.
   auto subtree = collectSubtree(e);
-  if (auto const *link = registry_.try_get<WorldLink>(e)) {
-    if (link->id.isValid())
-      pendingWorldDestroys_.push_back(link->id);
+  for (auto node : subtree) {
+    if (auto const *link = registry_.try_get<WorldLink>(node)) {
+      if (link->id.isValid())
+        pendingWorldDestroys_.push_back(link->id);
+    }
   }
   for (auto node : subtree) {
-    // Descendants' World ids die with the root — do not queue them (avoids double-free
-    // and prevents "recreate dead link" ghosts).
     if (registry_.valid(node))
       registry_.destroy(node);
   }
@@ -171,6 +178,26 @@ void EditorScene::clear(bool destroyWorldEntities) {
 void EditorScene::clearForModelSwitch() {
   // Installer will release Installed World entities; editor-created ones must go now.
   clear(true);
+}
+
+void EditorScene::forgetInstalledMirrors() {
+  requireGui();
+  // Remove Installed registry nodes without queuing World destroys (installer owns them).
+  // Do not touch editor-created entities (no Installed tag), even if parented under one.
+  std::vector<entt::entity> doomed;
+  for (auto e : registry_.view<Installed>())
+    doomed.push_back(e);
+  for (auto e : doomed) {
+    if (!registry_.valid(e))
+      continue;
+    // Clear Hierarchy.parent pointers that referenced this installed node.
+    for (auto child : registry_.view<Hierarchy>()) {
+      auto &h = registry_.get<Hierarchy>(child);
+      if (h.parent && *h.parent == e)
+        h.parent = std::nullopt;
+    }
+    registry_.destroy(e);
+  }
 }
 
 std::vector<entt::entity> EditorScene::topologicalDirty() const {
@@ -226,12 +253,9 @@ std::vector<entt::entity> EditorScene::topologicalDirty() const {
 
 void EditorScene::syncToWorld(lr::scene::World &world) {
   requireGui();
-  for (auto id : pendingWorldDestroys_) {
-    if (world.isAlive(id))
-      world.destroyEntity(id);
-  }
-  pendingWorldDestroys_.clear();
-
+  // N1: apply surviving entities' dirty reparents/transforms BEFORE flushing destroys.
+  // Otherwise an unsynced reparent-away + destroy(oldParent) leaves a dead WorldLink
+  // (World cascade-killed the child) or orphans (World parent was never updated).
   auto order = topologicalDirty();
   for (auto e : order) {
     if (!registry_.valid(e) || !registry_.all_of<Dirty>(e))
@@ -246,7 +270,6 @@ void EditorScene::syncToWorld(lr::scene::World &world) {
       worldParent = registry_.get<WorldLink>(*parent).id;
 
     if (auto *link = registry_.try_get<WorldLink>(e)) {
-      // Never recreate a dead WorldLink (probe 1: cascade destroy left stale child links).
       if (!world.isAlive(link->id))
         throw std::logic_error("EditorScene::syncToWorld: WorldLink not alive");
       world.setParent(link->id, worldParent);
@@ -265,6 +288,12 @@ void EditorScene::syncToWorld(lr::scene::World &world) {
     }
     registry_.remove<Dirty>(e);
   }
+
+  for (auto id : pendingWorldDestroys_) {
+    if (world.isAlive(id))
+      world.destroyEntity(id);
+  }
+  pendingWorldDestroys_.clear();
 }
 
 std::size_t EditorScene::entityCount() const noexcept {

@@ -8,6 +8,7 @@
 #include <QThread>
 #include <QTimer>
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <iostream>
 #include <lexec/execution.hpp>
@@ -1294,6 +1295,8 @@ TEST_CASE("session/editor-value-commands-transform-in-snapshot") {
   auto s = session(h);
   start(*s, false);
   REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  auto extractionsBefore = s->snapshot()->performance.deltaExtractions;
+  auto jobsBefore = h.jobs.size();
   auto id = s->createEditorEntity("edit", {});
   REQUIRE(id.isValid());
   {
@@ -1315,6 +1318,22 @@ TEST_CASE("session/editor-value-commands-transform-in-snapshot") {
         found = true;
     REQUIRE(found);
   }
+  // m-a: attach renderable so extractDelta carries the transform; expect new frame.
+  REQUIRE_FALSE(h.jobs[0].frame.delta.instances.empty());
+  s->setEntityMeshMaterial(id, h.jobs[0].frame.delta.instances[0].mesh,
+                           h.jobs[0].frame.delta.instances[0].material);
+  REQUIRE(test::until([&] { return h.jobs.size() > jobsBefore; }));
+  bool sawTranslation = false;
+  for (std::size_t i = jobsBefore; i < h.jobs.size(); ++i) {
+    for (auto const &inst : h.jobs[i].frame.delta.instances) {
+      auto const &m = inst.objectToWorld;
+      if (std::abs(m[3][0] - 4.f) < 0.05f && std::abs(m[3][1] - 5.f) < 0.05f)
+        sawTranslation = true;
+    }
+  }
+  CHECK(s->snapshot()->performance.deltaExtractions > extractionsBefore);
+  CHECK(sawTranslation);
+
   auto child = s->createEditorEntity("child", {}, id);
   REQUIRE(child.isValid());
   CHECK_THROWS_AS(s->setEntityParent(id, child), std::invalid_argument);
@@ -1325,6 +1344,22 @@ TEST_CASE("session/editor-value-commands-transform-in-snapshot") {
       CHECK(e.id != id);
       CHECK(e.id != child);
     }
+  }
+  // N2: stale ids after destroy must not crash.
+  CHECK_NOTHROW(s->setEntityTransform(id, {}));
+  CHECK_NOTHROW(s->destroyEntity(id));
+
+  // N3: failed model select must not wipe editor-created entities.
+  auto keep = s->createEditorEntity("keep", {});
+  REQUIRE(keep.isValid());
+  s->selectModel({"not-loaded"});
+  {
+    auto snap = s->snapshot();
+    bool found = false;
+    for (auto const &e : snap->entities)
+      if (e.id == keep && e.name == "keep")
+        found = true;
+    CHECK(found);
   }
   s->pause();
   for (std::size_t i = 0; i < h.jobs.size(); ++i)

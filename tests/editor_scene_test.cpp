@@ -10,6 +10,7 @@
 
 using demo::editor::EditorScene;
 using demo::editor::Installed;
+using demo::editor::Hierarchy;
 using demo::editor::WorldLink;
 
 // --- /tmp/e2probe regressions ---
@@ -185,4 +186,73 @@ TEST_CASE("editor/destroy-sync-removes-world-entity") {
   scene.syncToWorld(*world);
   CHECK_FALSE(world->isAlive(id));
   CHECK(scene.entityCount() == 0);
+}
+
+TEST_CASE("editor/probe5-unsynced-reparent-then-destroy-old-parent") {
+  EditorScene s;
+  auto w = lr::scene::makeWorld({});
+  auto p = s.create("p", {});
+  auto c = s.create("c", {}, p);
+  s.syncToWorld(*w);
+  auto cid = s.registry().get<WorldLink>(c).id;
+  s.setParent(c, std::nullopt);
+  s.destroy(p);
+  CHECK_NOTHROW(s.syncToWorld(*w));
+  REQUIRE(s.registry().valid(c));
+  CHECK(w->isAlive(cid));
+  CHECK(s.entityCount() == 1);
+  CHECK(w->entityCount() == 1);
+  auto parentOfC = s.registry().get<Hierarchy>(c).parent;
+  CHECK_FALSE(parentOfC.has_value());
+}
+
+TEST_CASE("editor/probe6-unsynced-reparent-under-q-then-destroy-q") {
+  EditorScene s;
+  auto w = lr::scene::makeWorld({});
+  auto p = s.create("p", {});
+  auto q = s.create("q", {});
+  auto c = s.create("c", {}, p);
+  s.syncToWorld(*w);
+  auto cid = s.registry().get<WorldLink>(c).id;
+  s.setParent(c, q);
+  s.destroy(q);
+  CHECK_NOTHROW(s.syncToWorld(*w));
+  CHECK(s.entityCount() == 1); // only p
+  CHECK(w->entityCount() == 1);
+  CHECK_FALSE(w->isAlive(cid)); // c's world entity flushed via subtree queue
+  CHECK(s.registry().valid(p));
+}
+
+TEST_CASE("editor/probe7-stale-entity-setters-throw-not-abort") {
+  EditorScene s;
+  auto w = lr::scene::makeWorld({});
+  auto e = s.create("x", {});
+  s.destroy(e);
+  auto e2 = s.create("y", {});
+  (void)e2;
+  CHECK_FALSE(s.registry().valid(e));
+  CHECK_THROWS_AS(s.setLocalTransform(e, {}), std::invalid_argument);
+  CHECK_THROWS_AS(s.setName(e, "z"), std::invalid_argument);
+  CHECK_THROWS_AS(s.setMeshMaterial(e, {}, {}), std::invalid_argument);
+  CHECK_NOTHROW(s.syncToWorld(*w));
+}
+
+TEST_CASE("editor/n3-readopt-after-staging-rollback-restores-installed") {
+  EditorScene s;
+  auto w = lr::scene::makeWorld({});
+  auto wid = w->createEntity({}, std::nullopt);
+  s.adoptWorldEntity(wid, "part0", {}, {}, {});
+  auto keep = s.create("keep", {});
+  REQUIRE(s.entityCount() == 2);
+  // N3: rollback remirror drops Installed only — editor-created survives.
+  s.forgetInstalledMirrors();
+  s.syncToWorld(*w);
+  CHECK(s.entityCount() == 1);
+  CHECK(s.registry().valid(keep));
+  CHECK(w->isAlive(wid)); // installed world kept for installer
+  auto e = s.adoptWorldEntity(wid, "part0", {}, {}, {});
+  CHECK(s.entityCount() == 2);
+  CHECK(s.registry().all_of<Installed>(e));
+  CHECK(s.registry().get<WorldLink>(e).id == wid);
+  CHECK(s.registry().valid(keep));
 }

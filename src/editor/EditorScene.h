@@ -49,6 +49,8 @@ public:
   void clear(bool destroyWorldEntities);
   // Model switch helper: forget Installed links, destroy editor-created World entities.
   void clearForModelSwitch();
+  // Drop Installed editor mirrors only (no World destroy). Keeps editor-created entities.
+  void forgetInstalledMirrors();
 
   void syncToWorld(lr::scene::World &world);
 

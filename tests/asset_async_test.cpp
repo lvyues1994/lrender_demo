@@ -666,6 +666,66 @@ TEST_CASE("asset_async/p9-temporal-history-restarts-once-after-texture-settlemen
   stop(session, h);
 }
 
+TEST_CASE("asset_async/n3-cancel-mid-install-keeps-editor-entities-editable") {
+  App app([](auto const &e, auto) -> Result<CpuAssetPtr> {
+    if (e.id.value == "diablo")
+      return fixture(e.id.value, 64);
+    return fixture(e.id.value, 2);
+  });
+  auto r = resources(app);
+  Harness h;
+  RenderSession *owner = nullptr;
+  EditorEntityId keep{};
+  bool cancelled = false;
+  auto events = h.events();
+  events.onSnapshot = [&](auto snap) {
+    if (cancelled || !owner || !keep.isValid())
+      return;
+    if (snap->assetInstalling && snap->installationParts > 0) {
+      cancelled = true;
+      // Cancel mid-staging: rollback + readopt must keep editor-created entities.
+      owner->selectModel({"not-in-catalog"});
+    }
+  };
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), std::move(events));
+  owner = &session;
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel && h.image &&
+           h.image->stamp.generation == session.snapshot()->generation;
+  }));
+  keep = session.createEditorEntity("keep", {});
+  REQUIRE(keep.isValid());
+  REQUIRE(session.snapshot()->entities.size() >= 3);
+  session.selectModel({"diablo"});
+  REQUIRE(test::until([&] {
+    return cancelled && !session.snapshot()->assetInstalling &&
+           session.snapshot()->installedModel.has_value() &&
+           session.snapshot()->installedModel->value == "african_head";
+  }));
+  bool found = false;
+  for (auto const &e : session.snapshot()->entities)
+    if (e.id.value == keep.value && e.name == "keep")
+      found = true;
+  CHECK(found);
+  lr::core::Transform xf{};
+  xf.translation = {1.f, 2.f, 3.f};
+  CHECK_NOTHROW(session.setEntityTransform(keep, xf));
+  {
+    bool edited = false;
+    for (auto const &e : session.snapshot()->entities)
+      if (e.id.value == keep.value && e.local.translation.x == 1.f)
+        edited = true;
+    CHECK(edited);
+  }
+  stop(session, h);
+}
+
 #include "app/ApplicationLifetime.h"
 TEST_CASE(
     "shutdown/late-real-loader-cancel-receipt-wakes-app-after-session-stop") {

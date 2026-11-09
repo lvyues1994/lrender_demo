@@ -488,8 +488,14 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     if (installer) {
       editor.clearForModelSwitch();
       // World may still be alive here; flush editor-created destroys before teardown.
-      if (resources.world)
-        editor.syncToWorld(*resources.world);
+      // m-b: never let sync logic_error hang shutdown — fail-closed and continue.
+      if (resources.world) {
+        try {
+          editor.syncToWorld(*resources.world);
+        } catch (std::exception const &e) {
+          report(issue(ErrorStage::Shutdown, "editor sync during teardown failed closed", e.what()));
+        }
+      }
     }
     installer.reset();
     auto bundle = std::make_shared<Resources>(std::move(resources));
@@ -593,23 +599,14 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     }
   }
 
-  // I1: before replacing the installed model, roll back staging, release journal
-  // (isAlive-safe), destroy editor-created World entities, clear dirty/WorldLinks.
+  // N3: do NOT clear the editor at install start — keep old model editable/visible
+  // until commit succeeds. Only roll back an in-flight staging transaction.
   void prepareEditorForInstall() {
     if (installer && installer->active())
       installer->rollback();
-    editor.clearForModelSwitch();
-    // Flush pending World destroys before AssetInstall mutates the scene.
-    if (resources.world)
-      editor.syncToWorld(*resources.world);
   }
 
-  void adoptInstalledIntoEditor() {
-    // Installer already released previous installed entities; clear leftover authoring
-    // without double-destroying Installed (none left) / destroy editor leftovers.
-    editor.clearForModelSwitch();
-    if (resources.world)
-      editor.syncToWorld(*resources.world);
+  void mirrorInstalledIntoEditor() {
     if (!installer)
       return;
     auto asset = installer->current();
@@ -625,6 +622,24 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       editor.adoptWorldEntity(ents[i], std::move(name), lr::core::Transform::identity(), meshes[i],
                               mats[i], std::nullopt);
     }
+  }
+
+  void adoptInstalledIntoEditor() {
+    // Commit path: installer already released previous installed World entities.
+    editor.clearForModelSwitch();
+    if (resources.world)
+      editor.syncToWorld(*resources.world);
+    mirrorInstalledIntoEditor();
+  }
+
+  // After cancelled/failed install: staging rolled back; World still has previous
+  // installed. N3: do NOT clearForModelSwitch (that would destroy editor-created
+  // entities). Drop Installed mirrors only, then re-adopt installer->installed.
+  void readoptInstalledAfterRollback() {
+    editor.forgetInstalledMirrors();
+    if (resources.world)
+      editor.syncToWorld(*resources.world);
+    mirrorInstalledIntoEditor();
   }
 
   bool installStep() {
@@ -669,6 +684,9 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       // Upstream resource allocators do not promise strong bad_alloc atomicity.
       // Fail closed: never extract uncertain mutations or retry a resource delta.
       readyAsset.reset();
+      if (installer && installer->active())
+        installer->rollback();
+      readoptInstalledAfterRollback(); // N3: restore editor↔World for still-installed model
       fault(issue(ErrorStage::Load, "asset installation failed closed", e.what()));
     }
     return true;
@@ -728,7 +746,12 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     try {
       if (!pending) {
         // Push editor dirty TRS/hierarchy/mesh-mat into World before extract.
-        editor.syncToWorld(*resources.world);
+        try {
+          editor.syncToWorld(*resources.world);
+        } catch (std::exception const &e) {
+          fault(issue(ErrorStage::Submit, "editor sync failed closed", e.what()));
+          return;
+        }
         pending = resources.world->extractDelta();
         ++performance.deltaExtractions;
       }
@@ -1010,7 +1033,10 @@ void RenderSession::selectModel(ModelId id) {
     job.second.cancel();
   s.pendingLoad.reset();
   s.readyAsset.reset();
+  bool wasStaging = s.installer && s.installer->active();
   s.installer->rollback();
+  if (wasStaging)
+    s.readoptInstalledAfterRollback(); // N3: keep editor-created; rebind Installed
   if (!s.loader) {
     s.report(issue(ErrorStage::Load, "asset loading unavailable", "no AssetLoader injected"));
     return;
@@ -1146,7 +1172,10 @@ EditorEntityId RenderSession::createEditorEntity(std::string name, lr::core::Tra
   if (parent) {
     if (!parent->isValid())
       throw std::invalid_argument("createEditorEntity: invalid parent");
-    p = s.fromId(*parent);
+    auto pe = s.fromId(*parent);
+    if (!s.editor.registry().valid(pe))
+      throw std::invalid_argument("createEditorEntity: stale parent");
+    p = pe;
   }
   auto e = s.editor.create(std::move(name), local, p);
   s.pump.markDirty();
@@ -1159,7 +1188,10 @@ void RenderSession::setEntityTransform(EditorEntityId id, lr::core::Transform lo
   s.owner();
   if (s.blocked() || !id.isValid())
     return;
-  s.editor.setLocalTransform(s.fromId(id), local);
+  auto e = s.fromId(id);
+  if (!s.editor.registry().valid(e))
+    return; // N2: stale id after destroy / model switch — ignore, do not abort
+  s.editor.setLocalTransform(e, local);
   s.pump.markDirty();
   s.queueTick();
   s.publish();
@@ -1169,13 +1201,19 @@ void RenderSession::setEntityParent(EditorEntityId id, std::optional<EditorEntit
   s.owner();
   if (s.blocked() || !id.isValid())
     return;
+  auto e = s.fromId(id);
+  if (!s.editor.registry().valid(e))
+    return;
   std::optional<entt::entity> p;
   if (parent) {
     if (!parent->isValid())
       throw std::invalid_argument("setEntityParent: invalid parent");
-    p = s.fromId(*parent);
+    auto pe = s.fromId(*parent);
+    if (!s.editor.registry().valid(pe))
+      return;
+    p = pe;
   }
-  s.editor.setParent(s.fromId(id), p);
+  s.editor.setParent(e, p);
   s.pump.markDirty();
   s.queueTick();
   s.publish();
@@ -1186,7 +1224,10 @@ void RenderSession::setEntityMeshMaterial(EditorEntityId id, lr::core::MeshId me
   s.owner();
   if (s.blocked() || !id.isValid())
     return;
-  s.editor.setMeshMaterial(s.fromId(id), mesh, material);
+  auto e = s.fromId(id);
+  if (!s.editor.registry().valid(e))
+    return;
+  s.editor.setMeshMaterial(e, mesh, material);
   s.pump.markDirty();
   s.queueTick();
   s.publish();
@@ -1196,7 +1237,10 @@ void RenderSession::destroyEntity(EditorEntityId id) {
   s.owner();
   if (s.blocked() || !id.isValid())
     return;
-  s.editor.destroy(s.fromId(id));
+  auto e = s.fromId(id);
+  if (!s.editor.registry().valid(e))
+    return;
+  s.editor.destroy(e);
   s.pump.markDirty();
   s.queueTick();
   s.publish();
