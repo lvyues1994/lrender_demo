@@ -1,6 +1,7 @@
 #pragma once
 #include <lr/core/Scene.h>
 #include <lr/core/Math.h>
+#include <lr/scene/World.h>
 #include <lr/render/Renderer.h>
 #include <cstdint>
 #include <functional>
@@ -29,6 +30,11 @@ struct EditorEntitySnapshot {
   lr::core::Transform local = lr::core::Transform::identity();
   std::optional<EditorEntityId> parent;
   bool installed = false;
+  std::optional<lr::core::MeshId> mesh;
+  std::optional<lr::core::MaterialId> material;
+  std::optional<lr::core::LightDesc> light;
+  std::optional<lr::scene::CameraLens> camera;
+  std::optional<lr::core::MaterialDesc> materialOverride;
 };
 using AssetRequestId = std::uint64_t;
 using SessionGeneration = std::uint64_t;

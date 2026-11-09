@@ -51,6 +51,12 @@ public:
   void setEntityTransform(EditorEntityId, lr::core::Transform);
   void setEntityParent(EditorEntityId, std::optional<EditorEntityId> parent);
   void setEntityMeshMaterial(EditorEntityId, lr::core::MeshId, lr::core::MaterialId);
+  void setEntityMaterialDesc(EditorEntityId, lr::core::MaterialDesc);
+  void clearEntityMaterialDesc(EditorEntityId);
+  void setEntityLight(EditorEntityId, lr::core::LightDesc);
+  void clearEntityLight(EditorEntityId);
+  void setEntityCamera(EditorEntityId, lr::scene::CameraLens);
+  void clearEntityCamera(EditorEntityId);
   void destroyEntity(EditorEntityId);
 
   // --- E3 Undo/Redo (TRS + Mesh/Material refs only; GUI thread) ---

@@ -36,6 +36,15 @@ public:
   // Remove MeshRef/MaterialRef (marks Dirty); sync calls World::removeRenderable.
   void clearMeshMaterial(entt::entity e);
 
+  // E4: optional Light / Camera / MaterialOverride. Clearing removes component + Dirty.
+  void setLight(entt::entity e, lr::core::LightDesc light);
+  void clearLight(entt::entity e);
+  void setCamera(entt::entity e, lr::scene::CameraLens lens);
+  void clearCamera(entt::entity e);
+  // Requires MaterialRef; sync calls WorldResources::replaceMaterial.
+  void setMaterialOverride(entt::entity e, lr::core::MaterialDesc desc);
+  void clearMaterialOverride(entt::entity e);
+
   // Cascade-destroy e and all descendants in the registry. Queues a single World
   // destroy for the root WorldLink (World already cascade-destroys descendants).
   void destroy(entt::entity e);

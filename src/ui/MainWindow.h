@@ -1,16 +1,21 @@
 #pragma once
+#include "HierarchyPanel.h"
+#include "PropertyPanel.h"
 #include "ViewportHost.h"
+#include "editor/SelectionState.h"
 #include <QMainWindow>
 class QAction;
 class QComboBox;
 class QDoubleSpinBox;
 class QCheckBox;
 class QLabel;
+class QDockWidget;
 namespace demo {
 class MainWindow : public QMainWindow {
 public:
   explicit MainWindow(UiCommands);
   ViewportHost &viewport() { return *viewport_; }
+  editor::SelectionState &selection() noexcept { return selection_; }
   void showSnapshot(SessionSnapshotPtr);
 
 protected:
@@ -19,6 +24,9 @@ protected:
 private:
   UiCommands commands_;
   ViewportHost *viewport_;
+  HierarchyPanel *hierarchy_ = nullptr;
+  PropertyPanel *properties_ = nullptr;
+  editor::SelectionState selection_;
   QComboBox *model_ = nullptr, *pipeline_ = nullptr;
   QDoubleSpinBox *exposure_ = nullptr;
   QCheckBox *taa_ = nullptr;

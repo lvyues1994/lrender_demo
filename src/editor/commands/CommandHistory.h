@@ -5,9 +5,11 @@
 
 #include <lr/core/Id.h>
 #include <lr/core/Math.h>
+#include <lr/core/Scene.h>
 
 #include <entt/entt.hpp>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -16,16 +18,10 @@
 namespace demo::editor {
 
 // GUI-thread-exclusive undo stack (A1.2). Value-semantic before/after records;
-// apply via EditorScene setters (Dirty → syncToWorld). Not QUndoStack: domain
-// must be testable without Widgets, merge/coalesce is custom, and stale entity
-// ids must skip without Qt text/index coupling. MainWindow binds QAction shortcuts
-// to session undo/redo which forward here.
+// apply via EditorScene setters (Dirty → syncToWorld). Not QUndoStack.
 //
-// Scope: Transform (local TRS) + MeshRef/MaterialRef only. Undo restores the
-// entity's local transform (not world-space). Session camera/pipeline/model and
-// ambient/roughness/normal stay latest-wins. Editable MaterialDesc parameter
-// undo lands with E4 inspector — E3 only records MeshId+MaterialId reference
-// swaps (including "no renderable" ↔ "has renderable").
+// Scope: Transform (local TRS), MeshRef/MaterialRef, Hierarchy parent, and
+// MaterialDesc override (E4). Session camera/pipeline/model stay latest-wins.
 
 struct TransformCommand {
   entt::entity entity{entt::null};
@@ -41,16 +37,25 @@ struct MaterialCommand {
   lr::core::MaterialId materialAfter{};
 };
 
-using EditorCommand = std::variant<TransformCommand, MaterialCommand>;
+struct HierarchyCommand {
+  entt::entity entity{entt::null};
+  std::optional<entt::entity> before{};
+  std::optional<entt::entity> after{};
+};
+
+struct MaterialDescCommand {
+  entt::entity entity{entt::null};
+  lr::core::MaterialId material{};
+  // nullopt = no MaterialOverride component before/after.
+  std::optional<lr::core::MaterialDesc> before{};
+  std::optional<lr::core::MaterialDesc> after{};
+};
+
+using EditorCommand =
+    std::variant<TransformCommand, MaterialCommand, HierarchyCommand, MaterialDescCommand>;
 
 class CommandHistory {
 public:
-  // Open a merge window (E5 gizmo drag / material slider). Only commands pushed
-  // after the outermost beginMerge coalesce with the previous in-window entry
-  // (same kind+entity); commands already on the stack are never swallowed (I2).
-  // Nested beginMerge is refcounted. undo/redo/clear end any open merge (M2).
-  // Returns merge epoch; outermost begin bumps epoch. Pass epoch to endMerge so a
-  // stale MergeGuard (after undo/redo ended the window) cannot close a newer merge.
   std::uint64_t beginMerge();
   void endMerge(std::uint64_t epoch = 0);
   bool isMerging() const noexcept { return mergeDepth_ > 0; }
@@ -61,31 +66,34 @@ public:
   void recordMaterial(entt::entity entity,
                       std::optional<std::pair<lr::core::MeshId, lr::core::MaterialId>> before,
                       lr::core::MeshId meshAfter, lr::core::MaterialId materialAfter);
+  void recordHierarchy(entt::entity entity, std::optional<entt::entity> before,
+                       std::optional<entt::entity> after);
+  void recordMaterialDesc(entt::entity entity, lr::core::MaterialId material,
+                          std::optional<lr::core::MaterialDesc> before,
+                          std::optional<lr::core::MaterialDesc> after);
 
   void executeTransform(EditorScene &scene, entt::entity entity, lr::core::Transform after);
   void executeMaterial(EditorScene &scene, entt::entity entity, lr::core::MeshId mesh,
                        lr::core::MaterialId material);
+  void executeHierarchy(EditorScene &scene, entt::entity entity,
+                        std::optional<entt::entity> parent);
+  void executeMaterialDesc(EditorScene &scene, entt::entity entity,
+                           lr::core::MaterialDesc desc);
 
   bool canUndo() const noexcept { return !undo_.empty(); }
   bool canRedo() const noexcept { return !redo_.empty(); }
   std::size_t undoDepth() const noexcept { return undo_.size(); }
   std::size_t redoDepth() const noexcept { return redo_.size(); }
 
-  // Restore before (undo) / after (redo). Missing entity → skip apply, still pop.
-  // Ends any open merge window.
   void undo(EditorScene &scene);
   void redo(EditorScene &scene);
-
   void clear() noexcept;
-
-  // M3: drop stack entries that reference e (call before/after registry destroy).
   void forgetEntity(entt::entity e);
 
 private:
   std::vector<EditorCommand> undo_;
   std::vector<EditorCommand> redo_;
   int mergeDepth_ = 0;
-  // undo_.size() at outermost beginMerge; coalesce only while size > anchor.
   std::optional<std::size_t> mergeAnchor_{};
   std::uint64_t mergeEpoch_ = 0;
 
@@ -95,9 +103,6 @@ private:
   static void applyAfter(EditorScene &scene, EditorCommand const &cmd);
 };
 
-// M2: RAII beginMerge/endMerge for E5 gizmo. Captures merge epoch at construction;
-// destructor is a no-op if undo/redo/clear already ended that window (stale epoch).
-// E5: undoing during a drag ends the current merge (see design Page A1.2 / E5).
 class MergeGuard {
 public:
   explicit MergeGuard(CommandHistory &history)

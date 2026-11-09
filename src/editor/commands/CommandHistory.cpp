@@ -29,9 +29,14 @@ void coalesceInto(EditorCommand &dst, EditorCommand const &src) {
         auto const &s = std::get<T>(src);
         if constexpr (std::is_same_v<T, TransformCommand>) {
           d.after = s.after;
-        } else {
+        } else if constexpr (std::is_same_v<T, MaterialCommand>) {
           d.meshAfter = s.meshAfter;
           d.materialAfter = s.materialAfter;
+        } else if constexpr (std::is_same_v<T, HierarchyCommand>) {
+          d.after = s.after;
+        } else if constexpr (std::is_same_v<T, MaterialDescCommand>) {
+          d.after = s.after;
+          d.material = s.material;
         }
       },
       dst);
@@ -47,7 +52,28 @@ materialBeforeOf(EditorScene const &scene, entt::entity e) {
 }
 
 bool referencesEntity(EditorCommand const &cmd, entt::entity e) {
-  return std::visit([&](auto const &c) { return c.entity == e; }, cmd);
+  return std::visit(
+      [&](auto const &c) {
+        using T = std::decay_t<decltype(c)>;
+        if (c.entity == e)
+          return true;
+        if constexpr (std::is_same_v<T, HierarchyCommand>) {
+          if (c.before && *c.before == e)
+            return true;
+          if (c.after && *c.after == e)
+            return true;
+        }
+        return false;
+      },
+      cmd);
+}
+
+void applyMaterialDesc(EditorScene &scene, entt::entity e,
+                       std::optional<lr::core::MaterialDesc> const &desc) {
+  if (desc)
+    scene.setMaterialOverride(e, *desc);
+  else
+    scene.clearMaterialOverride(e);
 }
 
 } // namespace
@@ -55,7 +81,7 @@ bool referencesEntity(EditorCommand const &cmd, entt::entity e) {
 void CommandHistory::endMergeFully() noexcept {
   mergeDepth_ = 0;
   mergeAnchor_.reset();
-  ++mergeEpoch_; // invalidate open MergeGuards (E5: undo during drag ends merge)
+  ++mergeEpoch_;
 }
 
 std::uint64_t CommandHistory::beginMerge() {
@@ -69,7 +95,7 @@ std::uint64_t CommandHistory::beginMerge() {
 
 void CommandHistory::endMerge(std::uint64_t epoch) {
   if (epoch != 0 && epoch != mergeEpoch_)
-    return; // stale guard after undo/redo/clear
+    return;
   if (mergeDepth_ > 0)
     --mergeDepth_;
   if (mergeDepth_ == 0)
@@ -83,7 +109,6 @@ void CommandHistory::clear() noexcept {
 }
 
 void CommandHistory::pushNew(EditorCommand cmd) {
-  // I2: only coalesce with entries pushed inside this merge window.
   if (mergeDepth_ > 0 && mergeAnchor_ && undo_.size() > *mergeAnchor_ &&
       sameEntityKind(undo_.back(), cmd)) {
     coalesceInto(undo_.back(), cmd);
@@ -105,6 +130,17 @@ void CommandHistory::recordMaterial(
   pushNew(MaterialCommand{entity, std::move(before), meshAfter, materialAfter});
 }
 
+void CommandHistory::recordHierarchy(entt::entity entity, std::optional<entt::entity> before,
+                                    std::optional<entt::entity> after) {
+  pushNew(HierarchyCommand{entity, before, after});
+}
+
+void CommandHistory::recordMaterialDesc(entt::entity entity, lr::core::MaterialId material,
+                                       std::optional<lr::core::MaterialDesc> before,
+                                       std::optional<lr::core::MaterialDesc> after) {
+  pushNew(MaterialDescCommand{entity, material, std::move(before), std::move(after)});
+}
+
 void CommandHistory::executeTransform(EditorScene &scene, entt::entity entity,
                                      lr::core::Transform after) {
   if (!scene.registry().valid(entity))
@@ -123,19 +159,46 @@ void CommandHistory::executeMaterial(EditorScene &scene, entt::entity entity,
   recordMaterial(entity, before, mesh, material);
 }
 
+void CommandHistory::executeHierarchy(EditorScene &scene, entt::entity entity,
+                                     std::optional<entt::entity> parent) {
+  if (!scene.registry().valid(entity))
+    return;
+  auto before = scene.registry().get<Hierarchy>(entity).parent;
+  scene.setParent(entity, parent);
+  recordHierarchy(entity, before, parent);
+}
+
+void CommandHistory::executeMaterialDesc(EditorScene &scene, entt::entity entity,
+                                        lr::core::MaterialDesc desc) {
+  if (!scene.registry().valid(entity))
+    return;
+  auto const *mat = scene.registry().try_get<MaterialRef>(entity);
+  if (!mat)
+    return;
+  std::optional<lr::core::MaterialDesc> before;
+  if (auto const *ovr = scene.registry().try_get<MaterialOverride>(entity))
+    before = ovr->value;
+  scene.setMaterialOverride(entity, desc);
+  recordMaterialDesc(entity, mat->id, before, desc);
+}
+
 void CommandHistory::applyBefore(EditorScene &scene, EditorCommand const &cmd) {
   std::visit(
       [&](auto const &c) {
         if (!scene.registry().valid(c.entity))
           return;
-        if constexpr (std::is_same_v<std::decay_t<decltype(c)>, TransformCommand>) {
-          // Restores local TRS (editor LocalTransform), not world-space.
+        using T = std::decay_t<decltype(c)>;
+        if constexpr (std::is_same_v<T, TransformCommand>) {
           scene.setLocalTransform(c.entity, c.before);
-        } else {
+        } else if constexpr (std::is_same_v<T, MaterialCommand>) {
           if (c.before)
             scene.setMeshMaterial(c.entity, c.before->first, c.before->second);
           else
             scene.clearMeshMaterial(c.entity);
+        } else if constexpr (std::is_same_v<T, HierarchyCommand>) {
+          scene.setParent(c.entity, c.before);
+        } else if constexpr (std::is_same_v<T, MaterialDescCommand>) {
+          applyMaterialDesc(scene, c.entity, c.before);
         }
       },
       cmd);
@@ -146,10 +209,15 @@ void CommandHistory::applyAfter(EditorScene &scene, EditorCommand const &cmd) {
       [&](auto const &c) {
         if (!scene.registry().valid(c.entity))
           return;
-        if constexpr (std::is_same_v<std::decay_t<decltype(c)>, TransformCommand>) {
+        using T = std::decay_t<decltype(c)>;
+        if constexpr (std::is_same_v<T, TransformCommand>) {
           scene.setLocalTransform(c.entity, c.after);
-        } else {
+        } else if constexpr (std::is_same_v<T, MaterialCommand>) {
           scene.setMeshMaterial(c.entity, c.meshAfter, c.materialAfter);
+        } else if constexpr (std::is_same_v<T, HierarchyCommand>) {
+          scene.setParent(c.entity, c.after);
+        } else if constexpr (std::is_same_v<T, MaterialDescCommand>) {
+          applyMaterialDesc(scene, c.entity, c.after);
         }
       },
       cmd);
@@ -183,7 +251,6 @@ void CommandHistory::forgetEntity(entt::entity e) {
   };
   drop(undo_);
   drop(redo_);
-  // Anchor may now point past size; clamp.
   if (mergeAnchor_ && *mergeAnchor_ > undo_.size())
     mergeAnchor_ = undo_.size();
 }

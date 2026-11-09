@@ -600,6 +600,16 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       if (parent)
         snap.parent = toId(*parent);
       snap.installed = editor.registry().all_of<editor::Installed>(e);
+      if (auto const *mesh = editor.registry().try_get<editor::MeshRef>(e))
+        snap.mesh = mesh->id;
+      if (auto const *mat = editor.registry().try_get<editor::MaterialRef>(e))
+        snap.material = mat->id;
+      if (auto const *light = editor.registry().try_get<editor::Light>(e))
+        snap.light = light->value;
+      if (auto const *cam = editor.registry().try_get<editor::Camera>(e))
+        snap.camera = cam->lens;
+      if (auto const *ovr = editor.registry().try_get<editor::MaterialOverride>(e))
+        snap.materialOverride = ovr->value;
       value.entities.push_back(std::move(snap));
     }
   }
@@ -1249,7 +1259,9 @@ void RenderSession::setEntityParent(EditorEntityId id, std::optional<EditorEntit
       return;
     p = pe;
   }
-  s.editor.setParent(e, p);
+  auto before = s.editor.registry().get<editor::Hierarchy>(e).parent;
+  s.editor.setParent(e, p); // throws invalid_argument on cycle
+  s.history.recordHierarchy(e, before, p);
   s.pump.markDirty();
   s.queueTick();
   s.publish();
@@ -1274,6 +1286,97 @@ void RenderSession::setEntityMeshMaterial(EditorEntityId id, lr::core::MeshId me
   s.queueTick();
   s.publish();
 }
+void RenderSession::setEntityMaterialDesc(EditorEntityId id, lr::core::MaterialDesc desc) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked() || !id.isValid())
+    return;
+  auto e = s.fromId(id);
+  if (!s.editor.registry().valid(e))
+    return;
+  auto const *mat = s.editor.registry().try_get<editor::MaterialRef>(e);
+  if (!mat)
+    return;
+  std::optional<lr::core::MaterialDesc> before;
+  if (auto const *ovr = s.editor.registry().try_get<editor::MaterialOverride>(e))
+    before = ovr->value;
+  s.editor.setMaterialOverride(e, desc);
+  s.history.recordMaterialDesc(e, mat->id, before, desc);
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+}
+void RenderSession::clearEntityMaterialDesc(EditorEntityId id) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked() || !id.isValid())
+    return;
+  auto e = s.fromId(id);
+  if (!s.editor.registry().valid(e))
+    return;
+  auto const *mat = s.editor.registry().try_get<editor::MaterialRef>(e);
+  if (!mat || !s.editor.registry().all_of<editor::MaterialOverride>(e))
+    return;
+  auto before = s.editor.registry().get<editor::MaterialOverride>(e).value;
+  s.editor.clearMaterialOverride(e);
+  s.history.recordMaterialDesc(e, mat->id, before, std::nullopt);
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+}
+void RenderSession::setEntityLight(EditorEntityId id, lr::core::LightDesc light) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked() || !id.isValid())
+    return;
+  auto e = s.fromId(id);
+  if (!s.editor.registry().valid(e))
+    return;
+  s.editor.setLight(e, std::move(light));
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+}
+void RenderSession::clearEntityLight(EditorEntityId id) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked() || !id.isValid())
+    return;
+  auto e = s.fromId(id);
+  if (!s.editor.registry().valid(e))
+    return;
+  s.editor.clearLight(e);
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+}
+void RenderSession::setEntityCamera(EditorEntityId id, lr::scene::CameraLens lens) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked() || !id.isValid())
+    return;
+  auto e = s.fromId(id);
+  if (!s.editor.registry().valid(e))
+    return;
+  s.editor.setCamera(e, lens);
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+}
+void RenderSession::clearEntityCamera(EditorEntityId id) {
+  auto &s = *impl_;
+  s.owner();
+  if (s.blocked() || !id.isValid())
+    return;
+  auto e = s.fromId(id);
+  if (!s.editor.registry().valid(e))
+    return;
+  s.editor.clearCamera(e);
+  s.pump.markDirty();
+  s.queueTick();
+  s.publish();
+}
+
 void RenderSession::destroyEntity(EditorEntityId id) {
   auto &s = *impl_;
   s.owner();

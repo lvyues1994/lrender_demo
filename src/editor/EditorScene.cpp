@@ -113,6 +113,56 @@ void EditorScene::clearMeshMaterial(entt::entity e) {
   markDirty(e);
 }
 
+void EditorScene::setLight(entt::entity e, lr::core::LightDesc light) {
+  requireGui();
+  if (!registry_.valid(e))
+    throw std::invalid_argument("EditorScene: invalid entity");
+  registry_.emplace_or_replace<Light>(e, Light{std::move(light)});
+  markDirty(e);
+}
+
+void EditorScene::clearLight(entt::entity e) {
+  requireGui();
+  if (!registry_.valid(e))
+    throw std::invalid_argument("EditorScene: invalid entity");
+  registry_.remove<Light>(e);
+  markDirty(e);
+}
+
+void EditorScene::setCamera(entt::entity e, lr::scene::CameraLens lens) {
+  requireGui();
+  if (!registry_.valid(e))
+    throw std::invalid_argument("EditorScene: invalid entity");
+  registry_.emplace_or_replace<Camera>(e, Camera{lens});
+  markDirty(e);
+}
+
+void EditorScene::clearCamera(entt::entity e) {
+  requireGui();
+  if (!registry_.valid(e))
+    throw std::invalid_argument("EditorScene: invalid entity");
+  registry_.remove<Camera>(e);
+  markDirty(e);
+}
+
+void EditorScene::setMaterialOverride(entt::entity e, lr::core::MaterialDesc desc) {
+  requireGui();
+  if (!registry_.valid(e))
+    throw std::invalid_argument("EditorScene: invalid entity");
+  if (!registry_.all_of<MaterialRef>(e))
+    throw std::invalid_argument("EditorScene: MaterialOverride requires MaterialRef");
+  registry_.emplace_or_replace<MaterialOverride>(e, MaterialOverride{std::move(desc)});
+  markDirty(e);
+}
+
+void EditorScene::clearMaterialOverride(entt::entity e) {
+  requireGui();
+  if (!registry_.valid(e))
+    throw std::invalid_argument("EditorScene: invalid entity");
+  registry_.remove<MaterialOverride>(e);
+  markDirty(e);
+}
+
 std::vector<entt::entity> EditorScene::collectSubtree(entt::entity root) const {
   std::vector<entt::entity> out;
   std::vector<entt::entity> stack{root};
@@ -414,12 +464,35 @@ void EditorScene::syncToWorld(lr::scene::World &world) {
       } else {
         world.removeRenderable(link->id);
       }
+      if (auto const *light = registry_.try_get<Light>(e))
+        world.setLight(link->id, light->value);
+      else
+        world.removeLight(link->id);
+      if (auto const *cam = registry_.try_get<Camera>(e))
+        world.setCamera(link->id, cam->lens);
+      // World has no removeCamera; clearing Camera leaves prior lens until entity destroy.
+      if (auto const *ovr = registry_.try_get<MaterialOverride>(e)) {
+        auto const *mat = registry_.try_get<MaterialRef>(e);
+        if (!mat)
+          throw std::logic_error("EditorScene::syncToWorld: MaterialOverride without MaterialRef");
+        world.resources().replaceMaterial(mat->id, ovr->value);
+      }
     } else {
       auto created = world.createEntity(local, worldParent);
       registry_.emplace<WorldLink>(e, WorldLink{created});
       if (auto const *mesh = registry_.try_get<MeshRef>(e)) {
         if (auto const *mat = registry_.try_get<MaterialRef>(e))
           world.setRenderable(created, {mesh->id, mat->id});
+      }
+      if (auto const *light = registry_.try_get<Light>(e))
+        world.setLight(created, light->value);
+      if (auto const *cam = registry_.try_get<Camera>(e))
+        world.setCamera(created, cam->lens);
+      if (auto const *ovr = registry_.try_get<MaterialOverride>(e)) {
+        auto const *mat = registry_.try_get<MaterialRef>(e);
+        if (!mat)
+          throw std::logic_error("EditorScene::syncToWorld: MaterialOverride without MaterialRef");
+        world.resources().replaceMaterial(mat->id, ovr->value);
       }
     }
     registry_.remove<Dirty>(e);

@@ -582,3 +582,52 @@ TEST_CASE("editor/random-ops-editor-world-invariant") {
             stress.editRejected);
   }
 }
+
+TEST_CASE("editor/light-camera-material-override-sync") {
+  using demo::editor::Camera;
+  using demo::editor::Light;
+  using demo::editor::MaterialOverride;
+  using demo::editor::MaterialRef;
+  using demo::editor::MeshRef;
+  EditorScene s;
+  auto w = lr::scene::makeWorld({});
+  auto mesh = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+  auto mat = w->resources().addMaterial(lr::core::MaterialDesc{});
+  auto e = s.create("L", {});
+  s.setMeshMaterial(e, mesh, mat);
+  lr::core::PointLight pl{};
+  pl.intensity = 3.f;
+  s.setLight(e, pl);
+  lr::scene::CameraLens lens{};
+  lens.verticalFov = 1.1f;
+  lens.nearPlane = 0.1f;
+  lens.farPlane = 100.f;
+  s.setCamera(e, lens);
+  lr::core::MaterialDesc desc{};
+  desc.roughness = 0.25f;
+  desc.metallic = 0.8f;
+  s.setMaterialOverride(e, desc);
+  s.syncToWorld(*w);
+  auto wid = s.registry().get<demo::editor::WorldLink>(e).id;
+  auto cam = w->cameraOf(wid);
+  CHECK(cam.verticalFov == doctest::Approx(1.1f));
+  auto delta = w->extractDelta();
+  CHECK_FALSE(delta.lights.empty());
+  // MaterialDesc is write-only on World; override stays on editor.
+  REQUIRE(s.registry().all_of<MaterialOverride>(e));
+  CHECK(s.registry().get<MaterialOverride>(e).value.roughness == doctest::Approx(0.25f));
+  demo::test::assertEditorWorldConsistent(s, *w);
+
+  s.clearLight(e);
+  s.syncToWorld(*w);
+  auto delta2 = w->extractDelta();
+  CHECK_FALSE(delta2.removed.lights.empty());
+  demo::test::assertEditorWorldConsistent(s, *w);
+}
+
+TEST_CASE("editor/material-override-requires-material-ref") {
+  EditorScene s;
+  auto e = s.create("bare", {});
+  CHECK_THROWS_AS(s.setMaterialOverride(e, lr::core::MaterialDesc{}), std::invalid_argument);
+}

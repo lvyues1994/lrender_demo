@@ -1,3 +1,4 @@
+#include <optional>
 #pragma once
 #include "presentation/NativeSurfaceFactory.h"
 #include "render/SessionTypes.h"
@@ -21,6 +22,15 @@ struct UiCommands {
   std::function<void()> redo;
   std::function<bool()> canUndo;
   std::function<bool()> canRedo;
+  // E4: outliner / property panel
+  std::function<void(EditorEntityId)> selectEntity;
+  std::function<void(EditorEntityId, std::optional<EditorEntityId>)> setEntityParent;
+  std::function<void(EditorEntityId, lr::core::Transform)> setEntityTransform;
+  std::function<void(EditorEntityId, lr::core::MaterialDesc)> setEntityMaterialDesc;
+  std::function<void(EditorEntityId, lr::core::LightDesc)> setEntityLight;
+  std::function<void(EditorEntityId)> clearEntityLight;
+  std::function<void(EditorEntityId, lr::scene::CameraLens)> setEntityCamera;
+  std::function<void(EditorEntityId)> clearEntityCamera;
 };
 class ViewportHost : public QWidget {
 public:

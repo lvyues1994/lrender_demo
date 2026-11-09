@@ -3,6 +3,8 @@
 #include <entt/entity/entity.hpp>
 #include <lr/core/Id.h>
 #include <lr/core/Math.h>
+#include <lr/core/Scene.h>
+#include <lr/scene/World.h>
 
 #include <optional>
 #include <string>
@@ -13,8 +15,7 @@ namespace demo::editor {
 // E3 Undo: snapshot LocalTransform + material params (hook only).
 // E4 Selection/Hierarchy/Inspector: Name + Hierarchy (+ future Selection).
 // E7 dual viewport: one shared registry; sync once per tick into session World.
-// Light / Camera / editable MaterialDesc overrides: deferred to E4 (inspector) /
-// material param commands already on RenderSession for roughness/normal — see E2 report.
+// Light / Camera / MaterialOverride: E4 inspector + Dirty→World sync.
 
 struct Name {
   std::string value;
@@ -45,5 +46,19 @@ struct Dirty {};
 // Adopted from AssetInstall — World lifetime owned by the installer journal.
 // Destroying these goes through forgetInstalled / installer release (isAlive-safe).
 struct Installed {};
+
+struct Light {
+  lr::core::LightDesc value{};
+};
+
+struct Camera {
+  lr::scene::CameraLens lens{};
+};
+
+// Authoritative MaterialDesc override for MaterialRef::id (WorldResources::replaceMaterial).
+struct MaterialOverride {
+  lr::core::MaterialDesc value{};
+};
+
 
 } // namespace demo::editor

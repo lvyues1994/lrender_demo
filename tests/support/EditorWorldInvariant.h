@@ -76,6 +76,28 @@ inline void assertEditorWorldConsistent(demo::editor::EditorScene const &scene,
       CHECK_FALSE(mesh);
       CHECK_FALSE(mat);
     }
+
+    // E4: Camera — if present, World::cameraOf succeeds and lens FOV/near/far match.
+    // World has no removeCamera; absent Camera does not assert World lens cleared.
+    if (auto const *cam = reg.try_get<demo::editor::Camera>(e)) {
+      lr::core::CameraDesc worldCam{};
+      CHECK_NOTHROW(worldCam = world.cameraOf(link.id));
+      CHECK(worldCam.verticalFov == doctest::Approx(cam->lens.verticalFov));
+      CHECK(worldCam.nearPlane == doctest::Approx(cam->lens.nearPlane));
+      CHECK(worldCam.farPlane == doctest::Approx(cam->lens.farPlane));
+    }
+    // Light: World has no lightOf query; require component + alive WorldLink only.
+    // Sync unit tests assert extractDelta light upserts/removals.
+    if (reg.all_of<demo::editor::Light>(e)) {
+      CHECK(world.isAlive(link.id));
+    }
+    // MaterialOverride is editor SoT (replaceMaterial is write-only); requires MaterialRef.
+    if (reg.all_of<demo::editor::MaterialOverride>(e)) {
+      REQUIRE(mat);
+      auto const &ovr = reg.get<demo::editor::MaterialOverride>(e).value;
+      CHECK(std::isfinite(ovr.roughness));
+      CHECK(std::isfinite(ovr.metallic));
+    }
     CHECK_FALSE(reg.all_of<demo::editor::Dirty>(e));
   }
   // Every editor entity has a WorldLink after sync; no pending destroys left in scene API

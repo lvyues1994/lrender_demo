@@ -1,4 +1,7 @@
 #include "MainWindow.h"
+#include <QDockWidget>
+#include <QStatusBar>
+#include <stdexcept>
 #include <QAction>
 #include <QKeySequence>
 #include <QMenu>
@@ -119,6 +122,72 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
   performance_->setObjectName("performance");
   performance_->setWordWrap(true);
   layout->addWidget(performance_);
+
+  HierarchyCommands hcmd;
+  hcmd.select = [this](EditorEntityId id) {
+    selection_.setPrimary(id);
+    if (commands_.selectEntity)
+      commands_.selectEntity(id);
+    if (properties_ && lastSnapshot_)
+      properties_->showSnapshot(lastSnapshot_, selection_);
+  };
+  hcmd.reparent = [this](EditorEntityId child, std::optional<EditorEntityId> parent) {
+    if (!commands_.setEntityParent)
+      return;
+    try {
+      commands_.setEntityParent(child, parent);
+    } catch (std::invalid_argument const &ex) {
+      if (status_)
+        status_->setText(QStringLiteral("Hierarchy: %1").arg(QString::fromUtf8(ex.what())));
+      throw;
+    }
+  };
+  hcmd.tip = [this](QString const &msg) {
+    if (status_)
+      status_->setText(msg);
+    statusBar()->showMessage(msg, 5000);
+  };
+  hierarchy_ = new HierarchyPanel(std::move(hcmd), this);
+  auto *hDock = new QDockWidget(QStringLiteral("Outliner"), this);
+  hDock->setObjectName("outlinerDock");
+  hDock->setWidget(hierarchy_);
+  addDockWidget(Qt::LeftDockWidgetArea, hDock);
+
+  PropertyCommands pcmd;
+  pcmd.setTransform = [this](EditorEntityId id, lr::core::Transform xf) {
+    if (commands_.setEntityTransform)
+      commands_.setEntityTransform(id, xf);
+  };
+  pcmd.setMaterialDesc = [this](EditorEntityId id, lr::core::MaterialDesc d) {
+    if (commands_.setEntityMaterialDesc)
+      commands_.setEntityMaterialDesc(id, d);
+  };
+  pcmd.setLight = [this](EditorEntityId id, lr::core::LightDesc l) {
+    if (commands_.setEntityLight)
+      commands_.setEntityLight(id, l);
+  };
+  pcmd.clearLight = [this](EditorEntityId id) {
+    if (commands_.clearEntityLight)
+      commands_.clearEntityLight(id);
+  };
+  pcmd.setCamera = [this](EditorEntityId id, lr::scene::CameraLens lens) {
+    if (commands_.setEntityCamera)
+      commands_.setEntityCamera(id, lens);
+  };
+  pcmd.clearCamera = [this](EditorEntityId id) {
+    if (commands_.clearEntityCamera)
+      commands_.clearEntityCamera(id);
+  };
+  pcmd.tip = [this](QString const &msg) {
+    if (status_)
+      status_->setText(msg);
+  };
+  properties_ = new PropertyPanel(std::move(pcmd), this);
+  auto *pDock = new QDockWidget(QStringLiteral("Properties"), this);
+  pDock->setObjectName("propertiesDock");
+  pDock->setWidget(properties_);
+  addDockWidget(Qt::RightDockWidgetArea, pDock);
+
   setCentralWidget(central);
   resize(720, 560);
   setWindowTitle("lrender · Qt Vulkan viewer");
@@ -185,6 +254,11 @@ void MainWindow::restoreAppearance() {
 }
 void MainWindow::showSnapshot(SessionSnapshotPtr s) {
   lastSnapshot_ = s;
+  selection_.pruneTo(s->entities);
+  if (hierarchy_)
+    hierarchy_->showSnapshot(s, selection_);
+  if (properties_)
+    properties_->showSnapshot(s, selection_);
   restoreAppearance();
   refreshEditActions();
   QSignalBlocker a(model_), b(pipeline_), c(exposure_), d(taa_);

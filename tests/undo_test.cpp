@@ -18,6 +18,8 @@ using demo::editor::Name;
 using demo::editor::Installed;
 using demo::editor::WorldLink;
 using demo::editor::MergeGuard;
+using demo::editor::MaterialOverride;
+using demo::editor::Hierarchy;
 using demo::test::nearTransform;
 
 namespace {
@@ -477,4 +479,38 @@ TEST_CASE("undo/readopt-adopt-branch-clears-when-world-has-no-renderable") {
   CHECK_FALSE(scene.registry().all_of<MaterialRef>(e));
   CHECK_FALSE(w->renderableOf(wid).has_value());
   demo::test::assertEditorWorldConsistent(scene, *w);
+}
+
+TEST_CASE("undo/hierarchy-reparent-roundtrip") {
+  EditorScene scene;
+  auto parent = scene.create("parent", {});
+  auto child = scene.create("child", {});
+  CommandHistory hist;
+  hist.executeHierarchy(scene, child, parent);
+  CHECK(scene.registry().get<Hierarchy>(child).parent == parent);
+  hist.undo(scene);
+  CHECK_FALSE(scene.registry().get<Hierarchy>(child).parent.has_value());
+  hist.redo(scene);
+  CHECK(scene.registry().get<Hierarchy>(child).parent == parent);
+}
+
+TEST_CASE("undo/material-desc-override-roundtrip") {
+  EditorScene scene;
+  auto w = lr::scene::makeWorld({});
+  auto mesh = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+  auto mat = w->resources().addMaterial({});
+  auto e = scene.create("m", {});
+  scene.setMeshMaterial(e, mesh, mat);
+  CommandHistory hist;
+  lr::core::MaterialDesc desc{};
+  desc.roughness = 0.2f;
+  desc.metallic = 0.9f;
+  hist.executeMaterialDesc(scene, e, desc);
+  REQUIRE(scene.registry().all_of<MaterialOverride>(e));
+  CHECK(scene.registry().get<MaterialOverride>(e).value.roughness == doctest::Approx(0.2f));
+  hist.undo(scene);
+  CHECK_FALSE(scene.registry().all_of<MaterialOverride>(e));
+  hist.redo(scene);
+  CHECK(scene.registry().get<MaterialOverride>(e).value.metallic == doctest::Approx(0.9f));
 }

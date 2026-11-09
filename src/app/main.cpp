@@ -263,6 +263,34 @@ struct Viewer : QObject {
     commands.canRedo = [&] {
       return session && session->canRedo();
     };
+    commands.setEntityParent = [this](auto id, auto parent) {
+      if (session)
+        session->setEntityParent(id, parent);
+    };
+    commands.setEntityTransform = [this](auto id, auto xf) {
+      if (session)
+        session->setEntityTransform(id, xf);
+    };
+    commands.setEntityMaterialDesc = [this](auto id, auto d) {
+      if (session)
+        session->setEntityMaterialDesc(id, d);
+    };
+    commands.setEntityLight = [this](auto id, auto l) {
+      if (session)
+        session->setEntityLight(id, l);
+    };
+    commands.clearEntityLight = [this](auto id) {
+      if (session)
+        session->clearEntityLight(id);
+    };
+    commands.setEntityCamera = [this](auto id, auto lens) {
+      if (session)
+        session->setEntityCamera(id, lens);
+    };
+    commands.clearEntityCamera = [this](auto id) {
+      if (session)
+        session->clearEntityCamera(id);
+    };
     commands.stop = [this] { requestStop(); };
     window = std::make_unique<MainWindow>(commands);
     if (!test.empty())
