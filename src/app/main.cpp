@@ -443,9 +443,7 @@ struct Viewer : QObject {
     statistics.start();
     script.setInterval(20);
     connect(&script, &QTimer::timeout, this, [this] {
-      if (elapsed.elapsed() > (test.rfind("e2e-", 0) == 0
-                                    ? 120000
-                                    : (test == "black-flash" ? 90000 : 45000))) {
+      if (elapsed.elapsed() > (test.rfind("e2e-", 0) == 0 ? 120000 : 45000)) {
         std::cerr << "deadline state=" << stage << " closing=" << closing
                   << " (resources retained; external test deadline required)"
                   << std::endl;
@@ -743,8 +741,9 @@ struct Viewer : QObject {
         return;
       }
       if (stage == 1) {
-        if (s->installedModel->value != "diablo" || completed <= lastCompleted ||
-            s->performance.inFlight)
+        // Advance on receipt count past baseline; do not wait for a quiet inFlight==0
+        // gap (Pathtrace keeps frames in flight almost continuously).
+        if (s->installedModel->value != "diablo" || completed <= lastCompleted)
           return;
         if (nearBlack(sampleViewport()))
           return;
@@ -756,13 +755,14 @@ struct Viewer : QObject {
         return;
       }
       if (stage == 2) {
-        // Pathtrace sample accumulation is not part of black-flash acceptance; only a
-        // post-rebuild presented receipt matters. Latency numbers are diagnostic only.
-        if (completed <= lastCompleted || s->performance.inFlight)
+        // Receipt past baseline proves soft rebuild presented; latency is diagnostic only.
+        if (completed <= lastCompleted)
           return;
         if (nearBlack(sampleViewport()))
           return;
         endFlash();
+        // Leave Pathtrace before resize so continuous PT does not dominate the wait.
+        session->setRenderOptions({PipelineKind::Visibility, 1, false});
         beginFlash("resize", 220, 160);
         window->viewport().setFixedSize(220, 160);
         lastCompleted = completed;
@@ -770,7 +770,7 @@ struct Viewer : QObject {
         return;
       }
       if (stage == 3) {
-        if (completed <= lastCompleted || s->performance.inFlight)
+        if (completed <= lastCompleted)
           return;
         if (nearBlack(sampleViewport()))
           return;
