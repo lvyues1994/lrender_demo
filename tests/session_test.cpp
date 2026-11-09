@@ -1405,21 +1405,32 @@ TEST_CASE("session/session-two-valid-reparents-same-frame") {
   REQUIRE(a.isValid());
   REQUIRE(x.isValid());
   REQUIRE(b.isValid());
-  REQUIRE(test::until([&] {
-    auto snap = s->snapshot();
-    int n = 0;
-    for (auto const &e : snap->entities)
-      if (e.id.value == a.value || e.id.value == x.value || e.id.value == b.value)
-        ++n;
-    return n == 3;
-  }));
+  // Wait until the create batch has been extracted (complete fake submits).
+  {
+    auto base = s->snapshot()->performance.deltaExtractions;
+    REQUIRE(test::until([&] {
+      for (std::size_t i = 0; i < h.jobs.size(); ++i)
+        h.complete(i);
+      auto snap = s->snapshot();
+      return snap->performance.deltaExtractions > base && snap->performance.inFlight == 0;
+    }));
+  }
+  auto extractBefore = s->snapshot()->performance.deltaExtractions;
   // Same-frame Dirty batch: X → root, A → B. Must sync without World cycle / Failed.
   s->setEntityParent(x, std::nullopt);
   s->setEntityParent(a, b);
   REQUIRE(test::until([&] {
+    for (std::size_t i = 0; i < h.jobs.size(); ++i)
+      h.complete(i);
     auto snap = s->snapshot();
     if (snap->life == LifeState::Failed)
       return true;
+    return snap->performance.deltaExtractions > extractBefore &&
+           snap->performance.inFlight == 0;
+  }));
+  CHECK(s->snapshot()->life != LifeState::Failed);
+  {
+    auto snap = s->snapshot();
     bool xRoot = false, aUnderB = false, bUnderX = false;
     for (auto const &e : snap->entities) {
       if (e.id.value == x.value && !e.parent)
@@ -1429,9 +1440,10 @@ TEST_CASE("session/session-two-valid-reparents-same-frame") {
       if (e.id.value == b.value && e.parent && e.parent->value == x.value)
         bUnderX = true;
     }
-    return xRoot && aUnderB && bUnderX;
-  }));
-  CHECK(s->snapshot()->life != LifeState::Failed);
+    CHECK(xRoot);
+    CHECK(aUnderB);
+    CHECK(bUnderX);
+  }
   s->pause();
   for (std::size_t i = 0; i < h.jobs.size(); ++i)
     h.complete(i);

@@ -657,6 +657,9 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     for (std::size_t i = 0; i < ents.size(); ++i)
       names.push_back(asset->model.value + "/part" + std::to_string(i));
     editor.readoptInstalledFromWorld(*resources.world, ents, names, meshes, mats);
+    // I6: sync/remirror mutated World; schedule extract (Visibility is not continuous).
+    pump.markDirty();
+    queueTick();
   }
 
   bool installStep() {

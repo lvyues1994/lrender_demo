@@ -113,6 +113,13 @@ set_tests_properties(e2e_submit_fault PROPERTIES LABELS "e2e;negative" ENVIRONME
 include(cmake/DependencyGuard.cmake)
 add_dependencies(demo_core demo_dependency_guard)
 set_tests_properties(demo_tests demo_link_smoke PROPERTIES LABELS "unit;integration")
+# Optional EditorScene random stress (40×3000); not part of default gate.
+option(DEMO_ENABLE_EDITOR_STRESS_TEST "Register 40×3000 EditorScene random stress CTest" OFF)
+if(DEMO_ENABLE_EDITOR_STRESS_TEST)
+  add_test(NAME demo_tests_editor_stress COMMAND demo_tests --test-case=*random-ops*)
+  set_tests_properties(demo_tests_editor_stress PROPERTIES LABELS "editor_stress" ENVIRONMENT "QT_QPA_PLATFORM=offscreen;DEMO_EDITOR_STRESS=1" TIMEOUT 120)
+endif()
+
 foreach(stage IN ITEMS install submit prepare bootstrap decode late-loader drain native)
  add_test(NAME e2e_close_${stage} COMMAND demo_e2e --backend cpu --presentation readback --model african_head --scenario close-loading --close-stage ${stage})
  set_tests_properties(e2e_close_${stage} PROPERTIES LABELS e2e ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60)

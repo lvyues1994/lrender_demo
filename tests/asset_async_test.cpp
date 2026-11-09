@@ -9,6 +9,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <doctest/doctest.h>
+#include <cmath>
 #include <iostream>
 #include <lqtexec/EventLoopContext.h>
 #include <lr/core/Primitives.h>
@@ -1006,6 +1007,338 @@ TEST_CASE("asset_async/dirty-edits-during-install-then-cancel") {
   stop(session, h);
 }
 
+
+
+TEST_CASE("asset_async/cancel-after-dirty-edits-schedules-extraction") {
+  // I6: mid-install Dirty edits + cancel must readopt AND markDirty so a follow-up
+  // extract publishes the edited transforms (not silent for 3s).
+  App app([](auto const &e, auto) -> Result<CpuAssetPtr> {
+    if (e.id.value == "diablo")
+      return fixture(e.id.value, 64);
+    return fixture(e.id.value, 2);
+  });
+  auto r = resources(app);
+  Harness h;
+  RenderSession *owner = nullptr;
+  bool cancelled = false;
+  bool armCancel = false;
+  bool editsApplied = false;
+  auto events = h.events();
+  events.onSnapshot = [&](auto snap) {
+    if (!owner || !armCancel)
+      return;
+    if (!editsApplied && snap->assetInstalling && snap->installationParts > 0) {
+      editsApplied = true;
+      EditorEntityId part0{}, part1{}, cId{};
+      for (auto const &e : snap->entities) {
+        if (e.installed && e.name.find("/part0") != std::string::npos)
+          part0 = e.id;
+        if (e.installed && e.name.find("/part1") != std::string::npos)
+          part1 = e.id;
+        if (e.name == "C")
+          cId = e.id;
+      }
+      if (part0.isValid() && part1.isValid() && cId.isValid()) {
+        lr::core::Transform cxf{};
+        cxf.translation = {3.f, 0.f, 0.f};
+        owner->setEntityTransform(cId, cxf);
+        owner->createEditorEntity("D", {}, part0);
+        lr::core::Transform p1xf{};
+        p1xf.translation = {9.f, 0.f, 0.f};
+        owner->setEntityTransform(part1, p1xf);
+      }
+    }
+    if (!cancelled && editsApplied && snap->assetInstalling && snap->installationParts > 0) {
+      cancelled = true;
+      owner->selectModel({"not-in-catalog"});
+    }
+  };
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), std::move(events));
+  owner = &session;
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel && h.image &&
+           h.image->stamp.generation == session.snapshot()->generation;
+  }));
+  EditorEntityId part0{};
+  {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities)
+      if (e.installed && e.name.find("/part0") != std::string::npos)
+        part0 = e.id;
+    REQUIRE(part0.isValid());
+  }
+  auto c = session.createEditorEntity("C", {}, part0);
+  REQUIRE(c.isValid());
+  REQUIRE(test::until([&] {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities)
+      if (e.id.value == c.value && e.parent && e.parent->value == part0.value)
+        return true;
+    return false;
+  }));
+  {
+    auto baseExtract = session.snapshot()->performance.deltaExtractions;
+    REQUIRE(test::until([&] {
+      auto snap = session.snapshot();
+      return snap->performance.deltaExtractions > baseExtract &&
+             snap->performance.inFlight == 0;
+    }));
+  }
+  auto extractAtArm = session.snapshot()->performance.deltaExtractions;
+  armCancel = true;
+  session.selectModel({"diablo"});
+  REQUIRE(test::until([&] {
+    return cancelled && editsApplied && !session.snapshot()->assetInstalling &&
+           session.snapshot()->installedModel &&
+           session.snapshot()->installedModel->value == "african_head";
+  }));
+  CHECK(session.snapshot()->life != LifeState::Failed);
+  // I6: a new extraction must land after cancel/readopt with edited values visible.
+  REQUIRE(test::until([&] {
+    return session.snapshot()->performance.deltaExtractions > extractAtArm;
+  }));
+  {
+    auto snap = session.snapshot();
+    EditorEntityId newP0{}, newP1{}, dId{};
+    bool cOk = false, dOk = false, p1Ok = false;
+    for (auto const &e : snap->entities) {
+      if (e.installed && e.name.find("/part0") != std::string::npos)
+        newP0 = e.id;
+      if (e.installed && e.name.find("/part1") != std::string::npos)
+        newP1 = e.id;
+      if (e.name == "D")
+        dId = e.id;
+    }
+    REQUIRE(newP0.isValid());
+    REQUIRE(newP1.isValid());
+    REQUIRE(dId.isValid());
+    for (auto const &e : snap->entities) {
+      if (e.id.value == c.value && e.parent && e.parent->value == newP0.value &&
+          e.local.translation.x == 3.f)
+        cOk = true;
+      if (e.id.value == dId.value && e.parent && e.parent->value == newP0.value)
+        dOk = true;
+      if (e.id.value == newP1.value && e.local.translation.x == 9.f)
+        p1Ok = true;
+    }
+    CHECK(cOk);
+    CHECK(dOk);
+    CHECK(p1Ok);
+    // Frame delta must carry the moved part (World SoT after readopt sync).
+    bool sawPartAt9 = false;
+    for (auto const &f : h.frames) {
+      for (auto const &inst : f.delta.instances) {
+        auto const &m = inst.objectToWorld;
+        if (std::abs(m[3][0] - 9.f) < 0.05f)
+          sawPartAt9 = true;
+      }
+    }
+    CHECK(sawPartAt9);
+  }
+  stop(session, h);
+}
+
+TEST_CASE("asset_async/install-fail-mid-staging-readopts-unsynced-edits") {
+  // I7: mid-staging step failure hits installStep catch + readopt with Dirty edits.
+  // Design: fail-closed → LifeState::Failed; edits are synced into editor/World via
+  // readopt before fault; stop must still complete.
+  CpuAssetPtr poison;
+  App app([&](auto const &e, auto) -> Result<CpuAssetPtr> {
+    if (e.id.value != "diablo")
+      return fixture(e.id.value, 2);
+    // Build a mutable asset (CpuAssetPtr is shared_ptr<const>) with two distinct meshes.
+    auto live = std::make_shared<CpuAsset>(*fixture(e.id.value, 2));
+    live->parts[1].mesh =
+        std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({.4f, .4f}));
+    poison = live; // shares ownership; later const_pointer_cast to poison step 2
+    return poison;
+  });
+  auto r = resources(app);
+  Harness h;
+  RenderSession *owner = nullptr;
+  bool armed = false;
+  bool editsApplied = false;
+  bool poisoned = false;
+  auto events = h.events();
+  events.onSnapshot = [&](auto snap) {
+    if (!owner || !armed || poisoned)
+      return;
+    if (snap->assetInstalling && snap->installationParts >= 1 && !editsApplied) {
+      editsApplied = true;
+      EditorEntityId part0{}, part1{};
+      for (auto const &e : snap->entities) {
+        if (e.installed && e.name.find("/part0") != std::string::npos)
+          part0 = e.id;
+        if (e.installed && e.name.find("/part1") != std::string::npos)
+          part1 = e.id;
+      }
+      if (!part0.isValid() || !part1.isValid())
+        return;
+      lr::core::Transform uxf{};
+      uxf.translation = {7.f, 0.f, 0.f};
+      auto u = owner->createEditorEntity("U", uxf);
+      owner->setEntityParent(part0, u);
+      lr::core::Transform p1xf{};
+      p1xf.translation = {9.f, 0.f, 0.f};
+      owner->setEntityTransform(part1, p1xf);
+      auto child = owner->createEditorEntity("child", {}, part0);
+      (void)child;
+      // Poison next step so installStep catch runs with Dirty still pending.
+      if (poison && poison->parts.size() > 1) {
+        auto live = std::const_pointer_cast<CpuAsset>(poison);
+        live->parts[1].mesh = {};
+      }
+      poisoned = true;
+    }
+  };
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), std::move(events));
+  owner = &session;
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel && h.image &&
+           h.image->stamp.generation == session.snapshot()->generation;
+  }));
+  armed = true;
+  session.selectModel({"diablo"});
+  REQUIRE(test::until([&] {
+    return poisoned && session.snapshot()->life == LifeState::Failed;
+  }));
+  {
+    auto snap = session.snapshot();
+    CHECK(snap->installedModel.has_value());
+    CHECK(snap->installedModel->value == "african_head");
+    EditorEntityId newP0{}, newP1{}, uId{}, childId{};
+    for (auto const &e : snap->entities) {
+      if (e.installed && e.name.find("/part0") != std::string::npos)
+        newP0 = e.id;
+      if (e.installed && e.name.find("/part1") != std::string::npos)
+        newP1 = e.id;
+      if (e.name == "U")
+        uId = e.id;
+      if (e.name == "child")
+        childId = e.id;
+    }
+    REQUIRE(newP0.isValid());
+    REQUIRE(newP1.isValid());
+    REQUIRE(uId.isValid());
+    REQUIRE(childId.isValid());
+    bool p0UnderU = false, childUnderP0 = false, p1At9 = false;
+    for (auto const &e : snap->entities) {
+      if (e.id.value == newP0.value && e.parent && e.parent->value == uId.value)
+        p0UnderU = true;
+      if (e.id.value == childId.value && e.parent && e.parent->value == newP0.value)
+        childUnderP0 = true;
+      if (e.id.value == newP1.value && e.local.translation.x == 9.f)
+        p1At9 = true;
+    }
+    CHECK(p0UnderU);
+    CHECK(childUnderP0);
+    CHECK(p1At9);
+  }
+  stop(session, h);
+}
+
+TEST_CASE("asset_async/install-edit-outcomes-cancel-fail-commit") {
+  // I7 combo matrix (fixed seed of outcomes): install-window edits × cancel / fail / commit.
+  // Cancel + commit covered by sibling cases; this seeds a short cancel→commit sequence
+  // asserting extraction after cancel and clearForModelSwitch on commit.
+  App app([](auto const &e, auto) -> Result<CpuAssetPtr> {
+    if (e.id.value == "diablo")
+      return fixture(e.id.value, 8);
+    return fixture(e.id.value, 2);
+  });
+  auto r = resources(app);
+  Harness h;
+  RenderSession *owner = nullptr;
+  bool armCancel = false;
+  bool cancelled = false;
+  bool editsApplied = false;
+  auto events = h.events();
+  events.onSnapshot = [&](auto snap) {
+    if (!owner || !armCancel)
+      return;
+    if (!editsApplied && snap->assetInstalling && snap->installationParts > 0) {
+      editsApplied = true;
+      for (auto const &e : snap->entities) {
+        if (e.installed && e.name.find("/part0") != std::string::npos) {
+          lr::core::Transform xf = e.local;
+          xf.translation.x = 6.f;
+          owner->setEntityTransform(e.id, xf);
+          owner->createEditorEntity("under", {}, e.id);
+          break;
+        }
+      }
+    }
+    if (!cancelled && editsApplied && snap->assetInstalling && snap->installationParts > 0) {
+      cancelled = true;
+      owner->selectModel({"not-in-catalog"});
+    }
+  };
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), std::move(events));
+  owner = &session;
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel && h.image &&
+           h.image->stamp.generation == session.snapshot()->generation;
+  }));
+  auto extractAtArm = session.snapshot()->performance.deltaExtractions;
+  armCancel = true;
+  session.selectModel({"diablo"});
+  REQUIRE(test::until([&] {
+    return cancelled && !session.snapshot()->assetInstalling &&
+           session.snapshot()->installedModel &&
+           session.snapshot()->installedModel->value == "african_head";
+  }));
+  REQUIRE(test::until(
+      [&] { return session.snapshot()->performance.deltaExtractions > extractAtArm; }));
+  {
+    auto snap = session.snapshot();
+    bool partAt6 = false, underOk = false;
+    EditorEntityId p0{};
+    for (auto const &e : snap->entities)
+      if (e.installed && e.name.find("/part0") != std::string::npos)
+        p0 = e.id;
+    REQUIRE(p0.isValid());
+    for (auto const &e : snap->entities) {
+      if (e.id.value == p0.value && e.local.translation.x == 6.f)
+        partAt6 = true;
+      if (e.name == "under" && e.parent && e.parent->value == p0.value)
+        underOk = true;
+    }
+    CHECK(partAt6);
+    CHECK(underOk);
+  }
+  armCancel = false;
+  session.selectModel({"diablo"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel &&
+           session.snapshot()->installedModel->value == "diablo" &&
+           !session.snapshot()->assetInstalling;
+  }));
+  CHECK(session.snapshot()->life != LifeState::Failed);
+  {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities)
+      CHECK(e.name != "under");
+  }
+  stop(session, h);
+}
 
 TEST_CASE("asset_async/fail-select-retains-editor-edits") {
   App app([](auto const &e, auto) -> Result<CpuAssetPtr> { return fixture(e.id.value, 2); });

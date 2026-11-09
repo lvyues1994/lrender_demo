@@ -13,6 +13,8 @@
 #include <vector>
 #include <string>
 #include <unordered_set>
+#include <cstdlib>
+#include <string_view>
 
 using demo::editor::EditorScene;
 using demo::editor::Dirty;
@@ -558,18 +560,25 @@ TEST_CASE("editor/random-ops-editor-world-invariant") {
   };
 
   Counts total{};
-  // Quick gate (also used under ASan); expanded suite below.
   for (std::uint32_t seed : {1u, 2u, 42u, 99u, 12345u})
     runSeed(seed, 800, total);
+  MESSAGE("random gate op counts: ",
+          total.op[0], " create, ", total.op[1], " destroy, ", total.op[2], " reparent, ",
+          total.op[3], " move, ", total.op[4], " mesh, ", total.op[5], " sync, ",
+          total.op[6], " readopt, ", total.op[7], " create-under; editRejected=",
+          total.editRejected);
+  CHECK(total.op[5] + total.op[6] > 0);
 
-  Counts stress{};
-  for (std::uint32_t seed = 1; seed <= 40; ++seed)
-    runSeed(seed, 3000, stress);
-  // Visible counts for the report (doctest MESSAGE).
-  MESSAGE("random stress op counts: ",
-          stress.op[0], " create, ", stress.op[1], " destroy, ", stress.op[2], " reparent, ",
-          stress.op[3], " move, ", stress.op[4], " mesh, ", stress.op[5], " sync, ",
-          stress.op[6], " readopt, ", stress.op[7], " create-under; editRejected=",
-          stress.editRejected);
-  CHECK(stress.op[5] + stress.op[6] > 0);
+  // Optional long stress: DEMO_EDITOR_STRESS=1 (also CTest label editor_stress).
+  if (const char *stressEnv = std::getenv("DEMO_EDITOR_STRESS");
+      stressEnv && stressEnv[0] == '1' && stressEnv[1] == '\0') {
+    Counts stress{};
+    for (std::uint32_t seed = 1; seed <= 40; ++seed)
+      runSeed(seed, 3000, stress);
+    MESSAGE("random stress op counts: ",
+            stress.op[0], " create, ", stress.op[1], " destroy, ", stress.op[2], " reparent, ",
+            stress.op[3], " move, ", stress.op[4], " mesh, ", stress.op[5], " sync, ",
+            stress.op[6], " readopt, ", stress.op[7], " create-under; editRejected=",
+            stress.editRejected);
+  }
 }
