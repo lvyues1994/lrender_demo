@@ -766,6 +766,116 @@ TEST_CASE("asset_async/n3-cancel-mid-install-keeps-editor-entities-editable") {
   stop(session, h);
 }
 
+
+TEST_CASE("asset_async/reverse-divergence-installed-under-user") {
+  App app([](auto const &e, auto) -> Result<CpuAssetPtr> {
+    if (e.id.value == "diablo")
+      return fixture(e.id.value, 64);
+    return fixture(e.id.value, 2);
+  });
+  auto r = resources(app);
+  Harness h;
+  RenderSession *owner = nullptr;
+  bool cancelled = false;
+  bool armCancel = false; // do not cancel the initial african_head install
+  auto events = h.events();
+  events.onSnapshot = [&](auto snap) {
+    if (cancelled || !owner || !armCancel)
+      return;
+    if (snap->assetInstalling && snap->installationParts > 0) {
+      cancelled = true;
+      owner->selectModel({"not-in-catalog"});
+    }
+  };
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), std::move(events));
+  owner = &session;
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    return session.snapshot()->installedModel && h.image &&
+           h.image->stamp.generation == session.snapshot()->generation;
+  }));
+
+  EditorEntityId part0{}, part1{};
+  {
+    auto snap = session.snapshot();
+    REQUIRE(snap->entities.size() >= 2);
+    for (auto const &e : snap->entities) {
+      if (!e.installed)
+        continue;
+      if (e.name.find("/part0") != std::string::npos)
+        part0 = e.id;
+      if (e.name.find("/part1") != std::string::npos)
+        part1 = e.id;
+    }
+    REQUIRE(part0.isValid());
+    REQUIRE(part1.isValid());
+  }
+
+  lr::core::Transform uxf{};
+  uxf.translation = {7.f, 0.f, 0.f};
+  auto u = session.createEditorEntity("U", uxf);
+  REQUIRE(u.isValid());
+  session.setEntityParent(part0, u);
+  lr::core::Transform p1xf{};
+  p1xf.translation = {5.f, 0.f, 0.f};
+  session.setEntityTransform(part1, p1xf);
+
+  REQUIRE(test::until([&] {
+    auto snap = session.snapshot();
+    bool p0UnderU = false, p1Moved = false;
+    for (auto const &e : snap->entities) {
+      if (e.id.value == part0.value && e.parent && e.parent->value == u.value)
+        p0UnderU = true;
+      if (e.id.value == part1.value && e.local.translation.x == 5.f)
+        p1Moved = true;
+    }
+    return p0UnderU && p1Moved;
+  }));
+
+  armCancel = true;
+  session.selectModel({"diablo"});
+  REQUIRE(test::until([&] {
+    return cancelled && !session.snapshot()->assetInstalling &&
+           session.snapshot()->installedModel.has_value() &&
+           session.snapshot()->installedModel->value == "african_head";
+  }));
+
+  {
+    auto snap = session.snapshot();
+    EditorEntityId newP0{}, newP1{};
+    bool uOk = false;
+    for (auto const &e : snap->entities) {
+      if (e.id.value == u.value)
+        uOk = true;
+      if (e.installed && e.name.find("/part0") != std::string::npos)
+        newP0 = e.id;
+      if (e.installed && e.name.find("/part1") != std::string::npos)
+        newP1 = e.id;
+    }
+    CHECK(uOk);
+    REQUIRE(newP0.isValid());
+    REQUIRE(newP1.isValid());
+    bool p0ParentU = false, p1At5 = false;
+    for (auto const &e : snap->entities) {
+      if (e.id.value == newP0.value && e.parent && e.parent->value == u.value)
+        p0ParentU = true;
+      if (e.id.value == newP1.value && e.local.translation.x == 5.f)
+        p1At5 = true;
+    }
+    CHECK(p0ParentU);
+    CHECK(p1At5);
+    // Reverse divergence: parenting U under newP0 is a cycle — rejected at edit time.
+    CHECK_THROWS_AS(session.setEntityParent(u, newP0), std::invalid_argument);
+    CHECK(session.snapshot()->life != LifeState::Failed);
+  }
+  stop(session, h);
+}
+
 #include "app/ApplicationLifetime.h"
 TEST_CASE(
     "shutdown/late-real-loader-cancel-receipt-wakes-app-after-session-stop") {

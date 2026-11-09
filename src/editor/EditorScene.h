@@ -11,12 +11,6 @@
 
 namespace demo::editor {
 
-// Child whose Installed parent mirror was dropped; rebind by World EntityId.
-struct OrphanWorldParent {
-  entt::entity child{};
-  lr::core::EntityId parentWorld{};
-};
-
 // GUI-thread-exclusive editor registry. RenderSession owns the World; this owns
 // authoring state and pushes incremental dirty updates into World.
 //
@@ -56,10 +50,18 @@ public:
   // Model switch helper: forget Installed links, destroy editor-created World entities.
   void clearForModelSwitch();
   // Drop Installed editor mirrors only (no World destroy). Keeps editor-created entities.
-  // Returns orphans that had an Installed parent (parentWorld = that parent's WorldLink).
-  std::vector<OrphanWorldParent> forgetInstalledMirrors();
-  // Reattach orphans to new Installed mirrors of the same World entities. No Dirty.
-  void rebindOrphansToInstalledMirrors(std::vector<OrphanWorldParent> const &orphans);
+  // Clears Hierarchy.parent that pointed at dropped mirrors (no Dirty).
+  void forgetInstalledMirrors();
+
+  // World-SoT remirror after cancel/fail rollback (also used on commit adopt):
+  // create Installed mirrors from World transformOf (parent null), then restore every
+  // WorldLink's parent/local transform from World via WorldLink→editor map (parents may
+  // be user entities or other mirrors). Never marks Dirty. Folds former orphan-rebind.
+  void remirrorInstalledFromWorld(lr::scene::World &world,
+                                  std::vector<lr::core::EntityId> const &worldEntities,
+                                  std::vector<std::string> const &names,
+                                  std::vector<lr::core::MeshId> const &meshes,
+                                  std::vector<lr::core::MaterialId> const &materials);
 
   void syncToWorld(lr::scene::World &world);
 
@@ -73,6 +75,7 @@ private:
   void markDirty(entt::entity e);
   std::vector<entt::entity> collectSubtree(entt::entity root) const;
   std::vector<entt::entity> topologicalDirty() const;
+  void restoreHierarchyFromWorld(lr::scene::World &world);
 
   QThread *owner_ = nullptr;
   entt::registry registry_{};

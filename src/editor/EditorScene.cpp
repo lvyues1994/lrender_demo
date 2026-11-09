@@ -181,62 +181,70 @@ void EditorScene::clearForModelSwitch() {
   clear(true);
 }
 
-std::vector<OrphanWorldParent> EditorScene::forgetInstalledMirrors() {
+void EditorScene::forgetInstalledMirrors() {
   requireGui();
-  // I1: before dropping Installed mirrors, remember editor-created children that
-  // pointed at them (by the parent's World EntityId) so remirror can reattach.
-  std::vector<OrphanWorldParent> orphans;
   std::vector<entt::entity> doomed;
   for (auto e : registry_.view<Installed>())
     doomed.push_back(e);
-  for (auto [child, hier] : registry_.view<Hierarchy>().each()) {
-    if (!hier.parent || !registry_.valid(*hier.parent))
-      continue;
-    if (!registry_.all_of<Installed>(*hier.parent))
-      continue;
-    if (registry_.all_of<Installed>(child))
-      continue; // both go away with the Installed set
-    auto const *link = registry_.try_get<WorldLink>(*hier.parent);
-    if (!link || !link->id.isValid())
-      continue;
-    orphans.push_back(OrphanWorldParent{child, link->id});
-  }
   for (auto e : doomed) {
     if (!registry_.valid(e))
       continue;
     for (auto child : registry_.view<Hierarchy>()) {
       auto &h = registry_.get<Hierarchy>(child);
       if (h.parent && *h.parent == e)
-        h.parent = std::nullopt;
+        h.parent = std::nullopt; // no Dirty — World still parents under installed
     }
     registry_.destroy(e);
   }
-  return orphans;
 }
 
-void EditorScene::rebindOrphansToInstalledMirrors(std::vector<OrphanWorldParent> const &orphans) {
+void EditorScene::restoreHierarchyFromWorld(lr::scene::World &world) {
   requireGui();
-  // Map World EntityId → new Installed editor mirror. No Dirty: World already parents so.
   auto worldKey = [](lr::core::EntityId id) -> std::uint64_t {
     return (static_cast<std::uint64_t>(id.generation) << 32) |
            static_cast<std::uint64_t>(id.index);
   };
   std::unordered_map<std::uint64_t, entt::entity> byWorld;
-  for (auto [e, link] : registry_.view<WorldLink, Installed>().each()) {
+  for (auto [e, link] : registry_.view<WorldLink>().each()) {
     if (link.id.isValid())
       byWorld[worldKey(link.id)] = e;
   }
-  for (auto const &o : orphans) {
-    if (!registry_.valid(o.child))
+  for (auto [e, link] : registry_.view<WorldLink>().each()) {
+    if (!link.id.isValid() || !world.isAlive(link.id))
+      throw std::logic_error("EditorScene::restoreHierarchyFromWorld: WorldLink not alive");
+    // Local transform from World (SoT); never Dirty.
+    registry_.get<LocalTransform>(e).value = world.transformOf(link.id);
+    auto wp = world.parentOf(link.id);
+    if (!wp) {
+      registry_.get<Hierarchy>(e).parent = std::nullopt;
       continue;
-    auto it = byWorld.find(worldKey(o.parentWorld));
+    }
+    auto it = byWorld.find(worldKey(*wp));
     if (it == byWorld.end())
-      continue; // installed World entity gone — leave as root
-    if (wouldCreateCycle(o.child, it->second))
-      throw std::logic_error("EditorScene::rebindOrphans: would create hierarchy cycle");
-    registry_.get<Hierarchy>(o.child).parent = it->second;
-    // intentionally not Dirty — World parent already matches
+      throw std::logic_error(
+          "EditorScene::restoreHierarchyFromWorld: World parent has no editor mirror");
+    registry_.get<Hierarchy>(e).parent = it->second;
   }
+}
+
+void EditorScene::remirrorInstalledFromWorld(
+    lr::scene::World &world, std::vector<lr::core::EntityId> const &worldEntities,
+    std::vector<std::string> const &names, std::vector<lr::core::MeshId> const &meshes,
+    std::vector<lr::core::MaterialId> const &materials) {
+  requireGui();
+  if (worldEntities.size() != names.size() || worldEntities.size() != meshes.size() ||
+      worldEntities.size() != materials.size())
+    throw std::logic_error("EditorScene::remirrorInstalledFromWorld: size mismatch");
+  // Phase 1: create every Installed mirror with World local transform, parent null.
+  for (std::size_t i = 0; i < worldEntities.size(); ++i) {
+    if (!world.isAlive(worldEntities[i]))
+      throw std::logic_error("EditorScene::remirrorInstalledFromWorld: entity not alive");
+    auto local = world.transformOf(worldEntities[i]);
+    adoptWorldEntity(worldEntities[i], names[i], local, meshes[i], materials[i], std::nullopt);
+  }
+  // Phase 2: restore ALL WorldLink parent/transform edges from World (orphans under
+  // installed, installed under user, moved parts, sibling mirrors). No Dirty.
+  restoreHierarchyFromWorld(world);
 }
 
 std::vector<entt::entity> EditorScene::topologicalDirty() const {

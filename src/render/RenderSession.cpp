@@ -613,16 +613,19 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     auto asset = installer->current();
     if (!asset)
       return;
+    if (!resources.world)
+      throw std::logic_error("mirrorInstalledIntoEditor: World required");
     auto const &ents = installer->installedEntities();
     auto const &meshes = installer->installedMeshes();
     auto const &mats = installer->installedPartMaterials();
     if (ents.size() != meshes.size() || ents.size() != mats.size())
       throw std::logic_error("AssetInstall entity/mesh/material size mismatch");
-    for (std::size_t i = 0; i < ents.size(); ++i) {
-      auto name = asset->model.value + "/part" + std::to_string(i);
-      editor.adoptWorldEntity(ents[i], std::move(name), lr::core::Transform::identity(), meshes[i],
-                              mats[i], std::nullopt);
-    }
+    std::vector<std::string> names;
+    names.reserve(ents.size());
+    for (std::size_t i = 0; i < ents.size(); ++i)
+      names.push_back(asset->model.value + "/part" + std::to_string(i));
+    // I2: World is SoT for parent/local transform of installed (and every WorldLink).
+    editor.remirrorInstalledFromWorld(*resources.world, ents, names, meshes, mats);
   }
 
   void adoptInstalledIntoEditor() {
@@ -637,12 +640,13 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   // installed. N3: do NOT clearForModelSwitch (that would destroy editor-created
   // entities). Drop Installed mirrors only, then re-adopt installer->installed.
   void readoptInstalledAfterRollback() {
-    // I1: remember orphan→World parent, remirror Installed, rebind without Dirty.
-    auto orphans = editor.forgetInstalledMirrors();
+    // I2: drop Installed mirrors, sync editor-created Dirty into World, then remirror
+    // from World SoT (parents/transforms for installed-under-user, moved parts, and
+    // orphans under installed). No Dirty on restored edges.
+    editor.forgetInstalledMirrors();
     if (resources.world)
       editor.syncToWorld(*resources.world);
     mirrorInstalledIntoEditor();
-    editor.rebindOrphansToInstalledMirrors(orphans);
   }
 
   bool installStep() {
