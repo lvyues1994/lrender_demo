@@ -55,15 +55,21 @@ bool referencesEntity(EditorCommand const &cmd, entt::entity e) {
 void CommandHistory::endMergeFully() noexcept {
   mergeDepth_ = 0;
   mergeAnchor_.reset();
+  ++mergeEpoch_; // invalidate open MergeGuards (E5: undo during drag ends merge)
 }
 
-void CommandHistory::beginMerge() {
-  if (mergeDepth_ == 0)
+std::uint64_t CommandHistory::beginMerge() {
+  if (mergeDepth_ == 0) {
     mergeAnchor_ = undo_.size();
+    ++mergeEpoch_;
+  }
   ++mergeDepth_;
+  return mergeEpoch_;
 }
 
-void CommandHistory::endMerge() {
+void CommandHistory::endMerge(std::uint64_t epoch) {
+  if (epoch != 0 && epoch != mergeEpoch_)
+    return; // stale guard after undo/redo/clear
   if (mergeDepth_ > 0)
     --mergeDepth_;
   if (mergeDepth_ == 0)

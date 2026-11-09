@@ -1631,3 +1631,60 @@ TEST_CASE("session/can-undo-false-when-blocked") {
   CHECK_FALSE(s->canUndo());
   CHECK_FALSE(s->canRedo());
 }
+
+
+TEST_CASE("session/editor-destroy-cascade-clears-undo") {
+  // Minor1: destroying a parent cascades; forgetEntity must leave canUndo false.
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  auto parent = s->createEditorEntity("parent", {});
+  auto child = s->createEditorEntity("child", {}, parent);
+  lr::core::Transform xf{};
+  xf.translation = {2.f, 0.f, 0.f};
+  s->setEntityTransform(child, xf);
+  REQUIRE(s->canUndo());
+  s->destroyEntity(parent);
+  CHECK_FALSE(s->canUndo());
+  CHECK_FALSE(s->canRedo());
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+}
+
+TEST_CASE("session/editor-undo-material-removes-world-instance") {
+  // Minor1: bare → set mesh → undo (有→无) must emit instance removal (removeRenderable).
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  REQUIRE_FALSE(h.jobs[0].frame.delta.instances.empty());
+  auto mesh = h.jobs[0].frame.delta.instances[0].mesh;
+  auto mat = h.jobs[0].frame.delta.instances[0].material;
+  auto id = s->createEditorEntity("U", {});
+  auto jobsBefore = h.jobs.size();
+  s->setEntityMeshMaterial(id, mesh, mat);
+  REQUIRE(test::until([&] { return h.jobs.size() > jobsBefore; }));
+  for (std::size_t i = jobsBefore; i < h.jobs.size(); ++i)
+    h.complete(i);
+  auto afterSet = h.jobs.size();
+  s->undo();
+  REQUIRE(test::until([&] {
+    return s->snapshot()->life == LifeState::Failed || h.jobs.size() > afterSet;
+  }));
+  CHECK(s->snapshot()->life != LifeState::Failed);
+  bool sawInstanceRemoval = false;
+  for (std::size_t i = afterSet; i < h.jobs.size(); ++i) {
+    if (!h.jobs[i].frame.delta.removed.instances.empty())
+      sawInstanceRemoval = true;
+  }
+  CHECK(sawInstanceRemoval);
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+}

@@ -62,6 +62,8 @@ inline void assertEditorWorldConsistent(demo::editor::EditorScene const &scene,
       CHECK(plink->id == *wp);
     }
 
+    // R1: MeshRef/MaterialRef must match World::renderableOf exactly (both present
+    // with same ids, or both absent). Remirror must not re-stamp installer catalogs.
     auto renderable = world.renderableOf(link.id);
     auto const *mesh = reg.try_get<demo::editor::MeshRef>(e);
     auto const *mat = reg.try_get<demo::editor::MaterialRef>(e);
@@ -70,9 +72,9 @@ inline void assertEditorWorldConsistent(demo::editor::EditorScene const &scene,
       REQUIRE(mat);
       CHECK(mesh->id == renderable->mesh);
       CHECK(mat->id == renderable->material);
-    } else if (mesh && mesh->id.isValid()) {
-      // Editor has a live MeshRef but World has no renderable — divergence.
-      FAIL("editor MeshRef present but World has no renderable");
+    } else {
+      CHECK_FALSE(mesh);
+      CHECK_FALSE(mat);
     }
     CHECK_FALSE(reg.all_of<demo::editor::Dirty>(e));
   }

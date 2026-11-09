@@ -1729,3 +1729,174 @@ TEST_CASE("asset_async/undo-redo-after-install-fail-keeps-ids") {
   session.requestStop();
   REQUIRE(test::until([&] { return h.stopped; }));
 }
+
+
+TEST_CASE("asset_async/readopt-preserves-edited-part-mesh-after-cancel") {
+  // R1: part0 mesh swapped to part1's mesh; cancel mid-install; move part0 — mesh stays.
+  App app([](auto const &e, auto) -> Result<CpuAssetPtr> {
+    if (e.id.value == "diablo")
+      return fixture(e.id.value, 64);
+    auto live = std::make_shared<CpuAsset>(*fixture(e.id.value, 2));
+    live->parts[1].mesh =
+        std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({.4f, .4f}));
+    return live;
+  });
+  auto r = resources(app);
+  Harness h;
+  RenderSession *owner = nullptr;
+  bool cancelled = false;
+  bool armed = false;
+  auto events = h.events();
+  events.onSnapshot = [&](auto snap) {
+    if (!owner || !armed || cancelled)
+      return;
+    if (snap->assetInstalling && snap->installationParts > 0) {
+      cancelled = true;
+      owner->selectModel({"not-in-catalog"});
+    }
+  };
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), std::move(events));
+  owner = &session;
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    auto snap = session.snapshot();
+    return snap->installedModel && h.image &&
+           h.image->stamp.generation == snap->generation;
+  }));
+  EditorEntityId part0{};
+  {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities)
+      if (e.installed && e.name.find("/part0") != std::string::npos)
+        part0 = e.id;
+  }
+  REQUIRE(part0.isValid());
+  lr::core::MeshId mesh0{}, mesh1{};
+  lr::core::MaterialId mat1{};
+  for (auto const &f : h.frames) {
+    for (auto const &inst : f.delta.instances) {
+      if (!mesh0.isValid()) {
+        mesh0 = inst.mesh;
+        continue;
+      }
+      if (inst.mesh != mesh0) {
+        mesh1 = inst.mesh;
+        mat1 = inst.material;
+      }
+    }
+  }
+  REQUIRE(mesh1.isValid());
+  session.setEntityMeshMaterial(part0, mesh1, mat1);
+  armed = true;
+  session.selectModel({"diablo"});
+  REQUIRE(test::until([&] {
+    auto snap = session.snapshot();
+    return cancelled && !snap->assetInstalling && snap->installedModel &&
+           snap->installedModel->value == "african_head";
+  }));
+  lr::core::Transform xf{};
+  xf.translation = {6.f, 0.f, 0.f};
+  auto framesBefore = h.frames.size();
+  session.setEntityTransform(part0, xf);
+  REQUIRE(test::until([&] {
+    return session.snapshot()->life == LifeState::Failed || h.frames.size() > framesBefore;
+  }));
+  CHECK(session.snapshot()->life != LifeState::Failed);
+  bool sawAlt = false;
+  for (std::size_t i = framesBefore; i < h.frames.size(); ++i) {
+    for (auto const &inst : h.frames[i].delta.instances) {
+      if (inst.mesh == mesh1)
+        sawAlt = true;
+    }
+  }
+  CHECK(sawAlt);
+  stop(session, h);
+}
+
+TEST_CASE("asset_async/readopt-preserves-edited-part-mesh-after-fail") {
+  // R1 fail path: swap part0 mesh, poison install; after Failed part0 id still valid.
+  CpuAssetPtr poison;
+  App app([&](auto const &e, auto) -> Result<CpuAssetPtr> {
+    auto live = std::make_shared<CpuAsset>(*fixture(e.id.value, 2));
+    live->parts[1].mesh =
+        std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({.4f, .4f}));
+    if (e.id.value == "diablo")
+      poison = live;
+    return live;
+  });
+  auto r = resources(app);
+  Harness h;
+  RenderSession *owner = nullptr;
+  bool armed = false;
+  bool poisoned = false;
+  auto events = h.events();
+  events.onSnapshot = [&](auto snap) {
+    if (!owner || !armed || poisoned)
+      return;
+    if (snap->assetInstalling && snap->installationParts >= 1) {
+      if (poison && poison->parts.size() > 1) {
+        auto live = std::const_pointer_cast<CpuAsset>(poison);
+        live->parts[1].mesh = {};
+      }
+      poisoned = true;
+    }
+  };
+  RenderSession session(std::move(r.runtime), std::move(r.renderer),
+                        std::move(r.world),
+                        std::make_unique<ReadbackAdapter>(h.presentation()),
+                        h.fake(), std::move(events));
+  owner = &session;
+  session.setAssetLoader(*app.loader);
+  start(session);
+  session.selectModel({"african_head"});
+  REQUIRE(test::until([&] {
+    auto snap = session.snapshot();
+    return snap->installedModel && h.image &&
+           h.image->stamp.generation == snap->generation;
+  }));
+  EditorEntityId part0{};
+  {
+    auto snap = session.snapshot();
+    for (auto const &e : snap->entities)
+      if (e.installed && e.name.find("/part0") != std::string::npos)
+        part0 = e.id;
+  }
+  REQUIRE(part0.isValid());
+  lr::core::MeshId mesh0{}, mesh1{};
+  lr::core::MaterialId mat1{};
+  for (auto const &f : h.frames) {
+    for (auto const &inst : f.delta.instances) {
+      if (!mesh0.isValid()) {
+        mesh0 = inst.mesh;
+        continue;
+      }
+      if (inst.mesh != mesh0) {
+        mesh1 = inst.mesh;
+        mat1 = inst.material;
+      }
+    }
+  }
+  REQUIRE(mesh1.isValid());
+  session.setEntityMeshMaterial(part0, mesh1, mat1);
+  armed = true;
+  session.selectModel({"diablo"});
+  REQUIRE(test::until([&] {
+    return poisoned && session.snapshot()->life == LifeState::Failed;
+  }));
+  {
+    auto snap = session.snapshot();
+    bool alive = false;
+    for (auto const &e : snap->entities)
+      if (e.id == part0)
+        alive = true;
+    CHECK(alive);
+  }
+  CHECK_FALSE(session.canUndo());
+  session.requestStop();
+  REQUIRE(test::until([&] { return h.stopped; }));
+}

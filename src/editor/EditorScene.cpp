@@ -253,6 +253,18 @@ void EditorScene::remirrorInstalledFromWorld(
     if (link.id.isValid())
       installedByWorld[worldKey(link.id)] = e;
   }
+  // R1: mesh/material always from World::renderableOf (SoT after sync), never the
+  // installer catalog arrays — those stay at original install-time ids and would
+  // clobber user MeshRef edits (or resurrect a cleared renderable).
+  auto applyRenderable = [&](entt::entity e, lr::core::EntityId wid) {
+    if (auto renderable = world.renderableOf(wid)) {
+      registry_.emplace_or_replace<MeshRef>(e, MeshRef{renderable->mesh});
+      registry_.emplace_or_replace<MaterialRef>(e, MaterialRef{renderable->material});
+    } else {
+      registry_.remove<MeshRef>(e);
+      registry_.remove<MaterialRef>(e);
+    }
+  };
   std::unordered_set<std::uint32_t> keep;
   for (std::size_t i = 0; i < worldEntities.size(); ++i) {
     if (!world.isAlive(worldEntities[i]))
@@ -260,17 +272,19 @@ void EditorScene::remirrorInstalledFromWorld(
     auto local = world.transformOf(worldEntities[i]);
     auto key = worldKey(worldEntities[i]);
     auto it = installedByWorld.find(key);
+    auto renderable = world.renderableOf(worldEntities[i]);
+    auto mesh = renderable ? renderable->mesh : lr::core::MeshId{};
+    auto mat = renderable ? renderable->material : lr::core::MaterialId{};
     if (it != installedByWorld.end()) {
       // I3: reuse editor entity — stable id for undo stack + E4 selection.
       auto e = it->second;
       registry_.get<Name>(e).value = names[i];
       registry_.get<LocalTransform>(e).value = local;
-      registry_.emplace_or_replace<MeshRef>(e, MeshRef{meshes[i]});
-      registry_.emplace_or_replace<MaterialRef>(e, MaterialRef{materials[i]});
+      applyRenderable(e, worldEntities[i]);
       keep.insert(static_cast<std::uint32_t>(entt::to_integral(e)));
     } else {
-      auto e = adoptWorldEntity(worldEntities[i], names[i], local, meshes[i], materials[i],
-                                std::nullopt);
+      auto e = adoptWorldEntity(worldEntities[i], names[i], local, mesh, mat, std::nullopt);
+      applyRenderable(e, worldEntities[i]); // drop MeshRef if World has no renderable
       keep.insert(static_cast<std::uint32_t>(entt::to_integral(e)));
     }
   }

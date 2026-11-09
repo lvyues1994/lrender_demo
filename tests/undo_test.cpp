@@ -344,3 +344,97 @@ TEST_CASE("undo/readopt-reuses-installed-entity-ids") {
   scene.syncToWorld(*w);
   demo::test::assertEditorWorldConsistent(scene, *w);
 }
+
+
+TEST_CASE("undo/readopt-preserves-edited-mesh-from-world") {
+  // R1: part0 uses mesh0; user switches to mesh1; readopt must keep mesh1 (World SoT),
+  // not reinstall mesh0 from the installer catalog arrays.
+  EditorScene scene;
+  auto w = lr::scene::makeWorld({});
+  auto mesh0 = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+  auto mesh1 = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({2, 2})));
+  auto mat = w->resources().addMaterial({});
+  auto w0 = w->createEntity({}, std::nullopt);
+  auto w1 = w->createEntity({}, std::nullopt);
+  w->setRenderable(w0, {mesh0, mat});
+  w->setRenderable(w1, {mesh1, mat}); // second part already different mesh
+  auto p0 = scene.adoptWorldEntity(w0, "part0", {}, mesh0, mat);
+  auto p1 = scene.adoptWorldEntity(w1, "part1", {}, mesh1, mat);
+  scene.syncToWorld(*w);
+  scene.setMeshMaterial(p0, mesh1, mat);
+  scene.syncToWorld(*w);
+  REQUIRE(w->renderableOf(w0)->mesh == mesh1);
+  // Simulate cancel remirror: catalog arrays still list original mesh0 for part0.
+  scene.readoptInstalledFromWorld(*w, {w0, w1}, {"part0", "part1"}, {mesh0, mesh1}, {mat, mat});
+  REQUIRE(scene.registry().valid(p0));
+  CHECK(scene.registry().get<MeshRef>(p0).id == mesh1);
+  lr::core::Transform xf{};
+  xf.translation = {4.f, 0.f, 0.f};
+  scene.setLocalTransform(p0, xf);
+  scene.syncToWorld(*w);
+  CHECK(w->renderableOf(w0)->mesh == mesh1);
+  demo::test::assertEditorWorldConsistent(scene, *w);
+}
+
+TEST_CASE("undo/readopt-preserves-cleared-mesh-from-world") {
+  // R1: clearMeshMaterial → World removeRenderable → readopt must not restore MeshRef.
+  EditorScene scene;
+  auto w = lr::scene::makeWorld({});
+  auto mesh0 = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+  auto mat = w->resources().addMaterial({});
+  auto wid = w->createEntity({}, std::nullopt);
+  w->setRenderable(wid, {mesh0, mat});
+  auto part = scene.adoptWorldEntity(wid, "part0", {}, mesh0, mat);
+  scene.syncToWorld(*w);
+  scene.clearMeshMaterial(part);
+  scene.syncToWorld(*w);
+  CHECK_FALSE(w->renderableOf(wid).has_value());
+  scene.readoptInstalledFromWorld(*w, {wid}, {"part0"}, {mesh0}, {mat});
+  CHECK_FALSE(scene.registry().all_of<MeshRef>(part));
+  CHECK_FALSE(scene.registry().all_of<MaterialRef>(part));
+  lr::core::Transform xf{};
+  xf.translation = {1.f, 0.f, 0.f};
+  scene.setLocalTransform(part, xf);
+  scene.syncToWorld(*w);
+  CHECK_FALSE(w->renderableOf(wid).has_value());
+  demo::test::assertEditorWorldConsistent(scene, *w);
+}
+
+TEST_CASE("undo/merge-guard-epoch-survives-undo-end") {
+  // Stale MergeGuard after undo/endMergeFully must not close a newer merge window.
+  EditorScene scene;
+  auto e = scene.create("g", {});
+  CommandHistory hist;
+  {
+    MergeGuard outer(hist);
+    CHECK(hist.isMerging());
+    lr::core::Transform a{};
+    a.translation = {1.f, 0.f, 0.f};
+    hist.executeTransform(scene, e, a);
+    hist.undo(scene); // ends merge, bumps epoch — outer becomes stale
+    CHECK_FALSE(hist.isMerging());
+    {
+      MergeGuard inner(hist);
+      CHECK(hist.isMerging());
+      lr::core::Transform b{};
+      b.translation = {2.f, 0.f, 0.f};
+      hist.executeTransform(scene, e, b);
+      lr::core::Transform c{};
+      c.translation = {3.f, 0.f, 0.f};
+      hist.executeTransform(scene, e, c);
+      CHECK(hist.undoDepth() == 1); // coalesced inside new window
+    } // inner ends merge
+    CHECK_FALSE(hist.isMerging());
+    hist.beginMerge();
+    CHECK(hist.isMerging());
+  } // outer dtor: stale epoch → no-op; must not end the beginMerge above incorrectly
+  // beginMerge inside outer scope was ended only if outer matched epoch — it must not.
+  // After outer dtor with stale epoch, the manual beginMerge should still be active...
+  // Wait: beginMerge inside outer's scope — if outer is stale, beginMerge's merge stays open.
+  CHECK(hist.isMerging());
+  hist.endMerge();
+  CHECK_FALSE(hist.isMerging());
+}

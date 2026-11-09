@@ -49,9 +49,12 @@ public:
   // after the outermost beginMerge coalesce with the previous in-window entry
   // (same kind+entity); commands already on the stack are never swallowed (I2).
   // Nested beginMerge is refcounted. undo/redo/clear end any open merge (M2).
-  void beginMerge();
-  void endMerge();
+  // Returns merge epoch; outermost begin bumps epoch. Pass epoch to endMerge so a
+  // stale MergeGuard (after undo/redo ended the window) cannot close a newer merge.
+  std::uint64_t beginMerge();
+  void endMerge(std::uint64_t epoch = 0);
   bool isMerging() const noexcept { return mergeDepth_ > 0; }
+  std::uint64_t mergeEpoch() const noexcept { return mergeEpoch_; }
 
   void recordTransform(entt::entity entity, lr::core::Transform before,
                        lr::core::Transform after);
@@ -84,6 +87,7 @@ private:
   int mergeDepth_ = 0;
   // undo_.size() at outermost beginMerge; coalesce only while size > anchor.
   std::optional<std::size_t> mergeAnchor_{};
+  std::uint64_t mergeEpoch_ = 0;
 
   void pushNew(EditorCommand cmd);
   void endMergeFully() noexcept;
@@ -91,27 +95,29 @@ private:
   static void applyAfter(EditorScene &scene, EditorCommand const &cmd);
 };
 
-// M2: RAII beginMerge/endMerge for E5 gizmo. Moves; undo/redo on the history
-// still ends merge independently (guard's endMerge is then a no-op depth clamp).
+// M2: RAII beginMerge/endMerge for E5 gizmo. Captures merge epoch at construction;
+// destructor is a no-op if undo/redo/clear already ended that window (stale epoch).
+// E5: undoing during a drag ends the current merge (see design Page A1.2 / E5).
 class MergeGuard {
 public:
-  explicit MergeGuard(CommandHistory &history) : history_(&history) {
-    history_->beginMerge();
-  }
+  explicit MergeGuard(CommandHistory &history)
+      : history_(&history), epoch_(history.beginMerge()) {}
   ~MergeGuard() {
     if (history_)
-      history_->endMerge();
+      history_->endMerge(epoch_);
   }
   MergeGuard(MergeGuard const &) = delete;
   MergeGuard &operator=(MergeGuard const &) = delete;
-  MergeGuard(MergeGuard &&other) noexcept : history_(other.history_) {
+  MergeGuard(MergeGuard &&other) noexcept
+      : history_(other.history_), epoch_(other.epoch_) {
     other.history_ = nullptr;
   }
   MergeGuard &operator=(MergeGuard &&other) noexcept {
     if (this != &other) {
       if (history_)
-        history_->endMerge();
+        history_->endMerge(epoch_);
       history_ = other.history_;
+      epoch_ = other.epoch_;
       other.history_ = nullptr;
     }
     return *this;
@@ -119,6 +125,7 @@ public:
 
 private:
   CommandHistory *history_ = nullptr;
+  std::uint64_t epoch_ = 0;
 };
 
 } // namespace demo::editor
