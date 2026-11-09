@@ -291,6 +291,14 @@ struct Viewer : QObject {
       if (session)
         session->clearEntityCamera(id);
     };
+    commands.beginEditMerge = [this]() {
+      if (session)
+        session->beginEditMerge();
+    };
+    commands.endEditMerge = [this]() {
+      if (session)
+        session->endEditMerge();
+    };
     commands.stop = [this] { requestStop(); };
     window = std::make_unique<MainWindow>(commands);
     if (!test.empty())

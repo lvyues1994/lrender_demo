@@ -6,7 +6,9 @@
 #include <lr/scene/World.h>
 
 #include <QThread>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace demo::editor {
@@ -44,6 +46,10 @@ public:
   // Requires MaterialRef; sync calls WorldResources::replaceMaterial.
   void setMaterialOverride(entt::entity e, lr::core::MaterialDesc desc);
   void clearMaterialOverride(entt::entity e);
+
+  // C1: base MaterialDesc keyed by original MaterialId (install-time / addMaterial).
+  void rememberMaterialBase(lr::core::MaterialId id, lr::core::MaterialDesc desc);
+  std::optional<lr::core::MaterialDesc> materialBaseOf(lr::core::MaterialId id) const;
 
   // Cascade-destroy e and all descendants in the registry. Queues a single World
   // destroy for the root WorldLink (World already cascade-destroys descendants).
@@ -106,6 +112,13 @@ private:
   QThread *owner_ = nullptr;
   entt::registry registry_{};
   std::vector<lr::core::EntityId> pendingWorldDestroys_{};
+  std::vector<lr::core::MaterialId> pendingMaterialReleases_{};
+  std::unordered_map<std::uint64_t, lr::core::MaterialDesc> materialBases_{};
+
+  static std::uint64_t materialKey(lr::core::MaterialId id) noexcept;
+  void queueReleaseOverrideCopy(entt::entity e);
+  void applyRenderableToWorld(lr::scene::World &world, entt::entity e,
+                              lr::core::EntityId wid);
 };
 
 } // namespace demo::editor

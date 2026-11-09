@@ -28,7 +28,12 @@ public:
   std::vector<lr::core::EntityId> const &installedEntities() const;
   std::vector<lr::core::MeshId> const &installedMeshes() const;
   std::vector<lr::core::MaterialId> const &installedPartMaterials() const;
-
+  // Original MaterialId + desc as last written to World (textures included).
+  struct MaterialEntry {
+    lr::core::MaterialId id{};
+    lr::core::MaterialDesc desc{};
+  };
+  std::vector<MaterialEntry> installedMaterialEntries() const;
 
 private:
   struct Impl;

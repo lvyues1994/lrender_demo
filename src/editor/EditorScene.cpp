@@ -99,6 +99,9 @@ void EditorScene::setMeshMaterial(entt::entity e, lr::core::MeshId mesh,
   requireGui();
   if (!registry_.valid(e))
     throw std::invalid_argument("EditorScene: invalid entity");
+  // Changing the shared MaterialRef drops any CoW override (E3 ref swap wins).
+  if (registry_.all_of<MaterialOverride>(e))
+    clearMaterialOverride(e);
   registry_.emplace_or_replace<MeshRef>(e, MeshRef{mesh});
   registry_.emplace_or_replace<MaterialRef>(e, MaterialRef{material});
   markDirty(e);
@@ -108,6 +111,8 @@ void EditorScene::clearMeshMaterial(entt::entity e) {
   requireGui();
   if (!registry_.valid(e))
     throw std::invalid_argument("EditorScene: invalid entity");
+  if (registry_.all_of<MaterialOverride>(e))
+    clearMaterialOverride(e);
   registry_.remove<MeshRef>(e);
   registry_.remove<MaterialRef>(e);
   markDirty(e);
@@ -145,13 +150,45 @@ void EditorScene::clearCamera(entt::entity e) {
   markDirty(e);
 }
 
+std::uint64_t EditorScene::materialKey(lr::core::MaterialId id) noexcept {
+  return static_cast<std::uint64_t>(id.value);
+}
+
+void EditorScene::rememberMaterialBase(lr::core::MaterialId id, lr::core::MaterialDesc desc) {
+  requireGui();
+  if (!id.isValid())
+    return;
+  materialBases_[materialKey(id)] = std::move(desc);
+}
+
+std::optional<lr::core::MaterialDesc>
+EditorScene::materialBaseOf(lr::core::MaterialId id) const {
+  if (!id.isValid())
+    return std::nullopt;
+  auto it = materialBases_.find(materialKey(id));
+  if (it == materialBases_.end())
+    return std::nullopt;
+  return it->second;
+}
+
+void EditorScene::queueReleaseOverrideCopy(entt::entity e) {
+  if (auto const *ovr = registry_.try_get<MaterialOverride>(e)) {
+    if (ovr->copyId.isValid())
+      pendingMaterialReleases_.push_back(ovr->copyId);
+  }
+}
+
 void EditorScene::setMaterialOverride(entt::entity e, lr::core::MaterialDesc desc) {
   requireGui();
   if (!registry_.valid(e))
     throw std::invalid_argument("EditorScene: invalid entity");
   if (!registry_.all_of<MaterialRef>(e))
     throw std::invalid_argument("EditorScene: MaterialOverride requires MaterialRef");
-  registry_.emplace_or_replace<MaterialOverride>(e, MaterialOverride{std::move(desc)});
+  MaterialOverride ovr{};
+  if (auto const *prev = registry_.try_get<MaterialOverride>(e))
+    ovr.copyId = prev->copyId; // keep existing CoW id across edits
+  ovr.value = std::move(desc);
+  registry_.emplace_or_replace<MaterialOverride>(e, std::move(ovr));
   markDirty(e);
 }
 
@@ -159,8 +196,29 @@ void EditorScene::clearMaterialOverride(entt::entity e) {
   requireGui();
   if (!registry_.valid(e))
     throw std::invalid_argument("EditorScene: invalid entity");
+  queueReleaseOverrideCopy(e);
   registry_.remove<MaterialOverride>(e);
   markDirty(e);
+}
+
+void EditorScene::applyRenderableToWorld(lr::scene::World &world, entt::entity e,
+                                         lr::core::EntityId wid) {
+  auto const *mesh = registry_.try_get<MeshRef>(e);
+  auto const *mat = registry_.try_get<MaterialRef>(e);
+  if (!mesh || !mat) {
+    world.removeRenderable(wid);
+    return;
+  }
+  if (auto *ovr = registry_.try_get<MaterialOverride>(e)) {
+    if (!ovr->copyId.isValid()) {
+      ovr->copyId = world.resources().addMaterial(ovr->value);
+    } else {
+      world.resources().replaceMaterial(ovr->copyId, ovr->value);
+    }
+    world.setRenderable(wid, {mesh->id, ovr->copyId});
+  } else {
+    world.setRenderable(wid, {mesh->id, mat->id});
+  }
 }
 
 std::vector<entt::entity> EditorScene::collectSubtree(entt::entity root) const {
@@ -191,6 +249,7 @@ void EditorScene::destroy(entt::entity e) {
   // destroying only the root would orphan them (probe6). Flush uses isAlive.
   auto subtree = collectSubtree(e);
   for (auto node : subtree) {
+    queueReleaseOverrideCopy(node);
     if (auto const *link = registry_.try_get<WorldLink>(node)) {
       if (link->id.isValid())
         pendingWorldDestroys_.push_back(link->id);
@@ -224,6 +283,8 @@ entt::entity EditorScene::adoptWorldEntity(lr::core::EntityId worldEntity, std::
 
 void EditorScene::clear(bool destroyWorldEntities) {
   requireGui();
+  for (auto e : registry_.view<MaterialOverride>())
+    queueReleaseOverrideCopy(e);
   if (destroyWorldEntities) {
     for (auto [e, link] : registry_.view<WorldLink>().each()) {
       if (registry_.all_of<Installed>(e))
@@ -233,6 +294,7 @@ void EditorScene::clear(bool destroyWorldEntities) {
     }
   }
   registry_.clear();
+  materialBases_.clear();
 }
 
 void EditorScene::clearForModelSwitch() {
@@ -309,8 +371,18 @@ void EditorScene::remirrorInstalledFromWorld(
   auto applyRenderable = [&](entt::entity e, lr::core::EntityId wid) {
     if (auto renderable = world.renderableOf(wid)) {
       registry_.emplace_or_replace<MeshRef>(e, MeshRef{renderable->mesh});
-      registry_.emplace_or_replace<MaterialRef>(e, MaterialRef{renderable->material});
+      if (auto *ovr = registry_.try_get<MaterialOverride>(e)) {
+        // MaterialRef stays the original shared id; World may point at CoW copy.
+        if (auto const *mat = registry_.try_get<MaterialRef>(e)) {
+          if (renderable->material != mat->id)
+            ovr->copyId = renderable->material;
+        }
+      } else {
+        registry_.emplace_or_replace<MaterialRef>(e, MaterialRef{renderable->material});
+      }
     } else {
+      queueReleaseOverrideCopy(e);
+      registry_.remove<MaterialOverride>(e);
       registry_.remove<MeshRef>(e);
       registry_.remove<MaterialRef>(e);
     }
@@ -456,44 +528,22 @@ void EditorScene::syncToWorld(lr::scene::World &world) {
         throw std::logic_error("EditorScene::syncToWorld: WorldLink not alive");
       world.setParent(link->id, worldParent);
       world.setTransform(link->id, local);
-      if (auto const *mesh = registry_.try_get<MeshRef>(e)) {
-        if (auto const *mat = registry_.try_get<MaterialRef>(e))
-          world.setRenderable(link->id, {mesh->id, mat->id});
-        else
-          world.removeRenderable(link->id);
-      } else {
-        world.removeRenderable(link->id);
-      }
+      applyRenderableToWorld(world, e, link->id);
       if (auto const *light = registry_.try_get<Light>(e))
         world.setLight(link->id, light->value);
       else
         world.removeLight(link->id);
       if (auto const *cam = registry_.try_get<Camera>(e))
         world.setCamera(link->id, cam->lens);
-      // World has no removeCamera; clearing Camera leaves prior lens until entity destroy.
-      if (auto const *ovr = registry_.try_get<MaterialOverride>(e)) {
-        auto const *mat = registry_.try_get<MaterialRef>(e);
-        if (!mat)
-          throw std::logic_error("EditorScene::syncToWorld: MaterialOverride without MaterialRef");
-        world.resources().replaceMaterial(mat->id, ovr->value);
-      }
+      // World has no removeCamera; I4: entity CameraLens does not drive the viewport.
     } else {
       auto created = world.createEntity(local, worldParent);
       registry_.emplace<WorldLink>(e, WorldLink{created});
-      if (auto const *mesh = registry_.try_get<MeshRef>(e)) {
-        if (auto const *mat = registry_.try_get<MaterialRef>(e))
-          world.setRenderable(created, {mesh->id, mat->id});
-      }
+      applyRenderableToWorld(world, e, created);
       if (auto const *light = registry_.try_get<Light>(e))
         world.setLight(created, light->value);
       if (auto const *cam = registry_.try_get<Camera>(e))
         world.setCamera(created, cam->lens);
-      if (auto const *ovr = registry_.try_get<MaterialOverride>(e)) {
-        auto const *mat = registry_.try_get<MaterialRef>(e);
-        if (!mat)
-          throw std::logic_error("EditorScene::syncToWorld: MaterialOverride without MaterialRef");
-        world.resources().replaceMaterial(mat->id, ovr->value);
-      }
     }
     registry_.remove<Dirty>(e);
   }
@@ -503,6 +553,11 @@ void EditorScene::syncToWorld(lr::scene::World &world) {
       world.destroyEntity(id);
   }
   pendingWorldDestroys_.clear();
+  for (auto mid : pendingMaterialReleases_) {
+    if (mid.isValid())
+      world.resources().releaseMaterial(mid);
+  }
+  pendingMaterialReleases_.clear();
 }
 
 std::size_t EditorScene::entityCount() const noexcept {

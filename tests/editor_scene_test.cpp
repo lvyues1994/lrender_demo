@@ -631,3 +631,84 @@ TEST_CASE("editor/material-override-requires-material-ref") {
   auto e = s.create("bare", {});
   CHECK_THROWS_AS(s.setMaterialOverride(e, lr::core::MaterialDesc{}), std::invalid_argument);
 }
+
+TEST_CASE("editor/material-override-cow-preserves-textures-and-original-ref") {
+  // C1: first override CoW-copies material (keeps textures); MaterialRef stays original;
+  // clear override points renderable back; peer sharing same material untouched.
+  EditorScene s;
+  auto w = lr::scene::makeWorld({});
+  auto mesh = w->resources().addMesh(
+      std::make_shared<lr::core::MeshData const>(lr::core::makeQuad({1, 1})));
+  lr::core::ImageData imgData;
+  imgData.extent = {1, 1};
+  imgData.levels = {{255, 0, 0, 255}};
+  auto img = std::make_shared<lr::core::ImageData const>(std::move(imgData));
+  auto tex = w->resources().addTexture(img, {});
+  lr::core::MaterialDesc base{};
+  base.roughness = 0.5f;
+  base.metallic = 0.0f;
+  base.baseColorTexture = tex;
+  base.normalTexture = tex;
+  auto mat = w->resources().addMaterial(base);
+  s.rememberMaterialBase(mat, base);
+
+  auto e0 = s.create("p0", {});
+  auto e1 = s.create("p1", {});
+  s.setMeshMaterial(e0, mesh, mat);
+  s.setMeshMaterial(e1, mesh, mat);
+  s.syncToWorld(*w);
+  w->extractDelta(); // drain
+
+  lr::core::MaterialDesc ovr = base;
+  ovr.roughness = 0.2f;
+  ovr.metallic = 0.9f;
+  s.setMaterialOverride(e0, ovr);
+  s.syncToWorld(*w);
+  auto delta = w->extractDelta();
+  REQUIRE_FALSE(delta.materials.empty());
+  bool sawCopy = false;
+  for (auto const &mu : delta.materials) {
+    if (mu.material.roughness == doctest::Approx(0.2f)) {
+      sawCopy = true;
+      CHECK(mu.material.baseColorTexture.has_value());
+      CHECK(mu.material.normalTexture.has_value());
+      CHECK(mu.id != mat);
+    }
+  }
+  CHECK(sawCopy);
+  auto w0 = s.registry().get<demo::editor::WorldLink>(e0).id;
+  auto w1 = s.registry().get<demo::editor::WorldLink>(e1).id;
+  CHECK(s.registry().get<demo::editor::MaterialRef>(e0).id == mat); // original ref
+  auto r0 = w->renderableOf(w0);
+  auto r1 = w->renderableOf(w1);
+  REQUIRE(r0);
+  REQUIRE(r1);
+  CHECK(r0->material != mat); // CoW
+  CHECK(r1->material == mat); // peer unchanged
+  demo::test::assertEditorWorldConsistent(s, *w);
+
+  // Second edit keeps the same CoW copyId (replaceMaterial path) and preserves textures in desc.
+  auto copyBefore = s.registry().get<demo::editor::MaterialOverride>(e0).copyId;
+  ovr.roughness = 0.35f;
+  s.setMaterialOverride(e0, ovr);
+  s.syncToWorld(*w);
+  auto const &ovr2 = s.registry().get<demo::editor::MaterialOverride>(e0);
+  CHECK(ovr2.copyId == copyBefore);
+  CHECK(ovr2.value.roughness == doctest::Approx(0.35f));
+  CHECK(ovr2.value.baseColorTexture.has_value());
+  CHECK(w->renderableOf(w0)->material == copyBefore);
+  CHECK(w->renderableOf(w1)->material == mat);
+  (void)w->extractDelta();
+  demo::test::assertEditorWorldConsistent(s, *w);
+
+  s.clearMaterialOverride(e0);
+  s.syncToWorld(*w);
+  auto delta2 = w->extractDelta();
+  CHECK(w->renderableOf(w0)->material == mat);
+  bool restored = false;
+  for (auto const &inst : delta2.instances)
+    if (inst.material == mat)
+      restored = true;
+  CHECK(restored);
+  demo::test::assertEditorWorldConsistent(s, *w);
+}

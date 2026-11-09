@@ -514,3 +514,16 @@ TEST_CASE("undo/material-desc-override-roundtrip") {
   hist.redo(scene);
   CHECK(scene.registry().get<MaterialOverride>(e).value.metallic == doctest::Approx(0.9f));
 }
+
+TEST_CASE("undo/forget-entity-drops-parent-refs") {
+  // Mutation: forgetEntity without checking HierarchyCommand before/after parent refs
+  // leaves a reparent command alive after the parent id is gone.
+  EditorScene scene;
+  auto parent = scene.create("parent", {});
+  auto child = scene.create("child", {});
+  CommandHistory hist;
+  hist.executeHierarchy(scene, child, parent);
+  REQUIRE(hist.canUndo());
+  hist.forgetEntity(parent);
+  CHECK_FALSE(hist.canUndo());
+}

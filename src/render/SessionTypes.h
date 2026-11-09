@@ -35,6 +35,8 @@ struct EditorEntitySnapshot {
   std::optional<lr::core::LightDesc> light;
   std::optional<lr::scene::CameraLens> camera;
   std::optional<lr::core::MaterialDesc> materialOverride;
+  // Install-time / remembered base desc for the original MaterialRef (textures).
+  std::optional<lr::core::MaterialDesc> materialBase;
 };
 using AssetRequestId = std::uint64_t;
 using SessionGeneration = std::uint64_t;

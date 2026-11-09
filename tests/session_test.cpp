@@ -1688,3 +1688,170 @@ TEST_CASE("session/editor-undo-material-removes-world-instance") {
   REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
   stop(*s, h);
 }
+
+TEST_CASE("session/hierarchy-undo-redo-syncs-world-parent") {
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  auto parent = s->createEditorEntity("parent", {});
+  auto child = s->createEditorEntity("child", {});
+  REQUIRE(parent.isValid());
+  REQUIRE(child.isValid());
+  auto jobsBefore = h.jobs.size();
+  s->setEntityParent(child, parent);
+  {
+    auto snap = s->snapshot();
+    bool ok = false;
+    for (auto const &e : snap->entities)
+      if (e.id == child && e.parent == parent)
+        ok = true;
+    REQUIRE(ok);
+  }
+  REQUIRE(s->canUndo());
+  s->undo();
+  {
+    auto snap = s->snapshot();
+    for (auto const &e : snap->entities)
+      if (e.id == child)
+        CHECK_FALSE(e.parent.has_value());
+  }
+  s->redo();
+  {
+    auto snap = s->snapshot();
+    bool ok = false;
+    for (auto const &e : snap->entities)
+      if (e.id == child && e.parent == parent)
+        ok = true;
+    CHECK(ok);
+  }
+  // Same-parent no-op must not grow undo stack.
+  auto canBefore = s->canUndo();
+  s->setEntityParent(child, parent);
+  CHECK(s->canUndo() == canBefore);
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+  (void)jobsBefore;
+}
+
+TEST_CASE("session/material-desc-cow-undo-redo-world-delta") {
+  // C1 + I5: session MaterialDesc CoW; undo clears override; peer MaterialRef shared;
+  // delta.materials carries textured copy; snapshot.materialOverride round-trips.
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  REQUIRE_FALSE(h.jobs[0].frame.delta.instances.empty());
+  auto mesh = h.jobs[0].frame.delta.instances[0].mesh;
+  auto mat = h.jobs[0].frame.delta.instances[0].material;
+  std::optional<lr::core::TextureId> baseColorTex;
+  std::optional<lr::core::TextureId> normalTex;
+  for (auto const &mu : h.jobs[0].frame.delta.materials) {
+    if (mu.id == mat) {
+      baseColorTex = mu.material.baseColorTexture;
+      normalTex = mu.material.normalTexture;
+    }
+  }
+
+  auto p0 = s->createEditorEntity("p0", {});
+  auto p1 = s->createEditorEntity("p1", {});
+  s->setEntityMeshMaterial(p0, mesh, mat);
+  s->setEntityMeshMaterial(p1, mesh, mat);
+
+  lr::core::MaterialDesc desc{};
+  desc.roughness = 0.2f;
+  desc.metallic = 0.9f;
+  desc.baseColorTexture = baseColorTex;
+  desc.normalTexture = normalTex;
+  auto jobsBefore = h.jobs.size();
+  s->setEntityMaterialDesc(p0, desc);
+  {
+    auto snap = s->snapshot();
+    bool found = false;
+    for (auto const &e : snap->entities) {
+      if (e.id != p0)
+        continue;
+      REQUIRE(e.materialOverride);
+      CHECK(e.materialOverride->roughness == doctest::Approx(0.2f));
+      CHECK(e.material == mat);
+      found = true;
+    }
+    REQUIRE(found);
+    for (auto const &e : snap->entities) {
+      if (e.id == p1)
+        CHECK_FALSE(e.materialOverride.has_value());
+    }
+  }
+  REQUIRE(test::until([&] { return h.jobs.size() > jobsBefore; }));
+  bool sawCopy = false;
+  for (std::size_t i = jobsBefore; i < h.jobs.size(); ++i) {
+    for (auto const &mu : h.jobs[i].frame.delta.materials) {
+      if (mu.material.roughness == doctest::Approx(0.2f) && mu.id != mat) {
+        sawCopy = true;
+        CHECK(mu.material.baseColorTexture == baseColorTex);
+        CHECK(mu.material.normalTexture == normalTex);
+      }
+    }
+  }
+  CHECK(sawCopy);
+
+  // Session roughness mutates original; override entity keeps override in snapshot.
+  s->setRoughness(0.75f);
+  {
+    auto snap = s->snapshot();
+    for (auto const &e : snap->entities) {
+      if (e.id == p0) {
+        REQUIRE(e.materialOverride);
+        CHECK(e.materialOverride->roughness == doctest::Approx(0.2f));
+      }
+    }
+  }
+
+  REQUIRE(s->canUndo());
+  s->undo();
+  {
+    auto snap = s->snapshot();
+    for (auto const &e : snap->entities) {
+      if (e.id == p0)
+        CHECK_FALSE(e.materialOverride.has_value());
+    }
+  }
+  s->redo();
+  {
+    auto snap = s->snapshot();
+    bool found = false;
+    for (auto const &e : snap->entities) {
+      if (e.id == p0 && e.materialOverride) {
+        CHECK(e.materialOverride->roughness == doctest::Approx(0.2f));
+        CHECK(e.materialOverride->baseColorTexture == baseColorTex);
+        found = true;
+      }
+    }
+    CHECK(found);
+  }
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+}
+
+TEST_CASE("session/material-desc-not-recorded-when-missing-ref") {
+  Harness h;
+  auto s = session(h);
+  start(*s, false);
+  REQUIRE(test::until([&] { return h.jobs.size() >= 1; }));
+  auto id = s->createEditorEntity("bare", {});
+  // No MaterialRef → setEntityMaterialDesc is a no-op (no undo).
+  CHECK_FALSE(s->canUndo());
+  s->setEntityMaterialDesc(id, lr::core::MaterialDesc{});
+  CHECK_FALSE(s->canUndo());
+  s->pause();
+  for (std::size_t i = 0; i < h.jobs.size(); ++i)
+    h.complete(i);
+  REQUIRE(test::until([&] { return s->snapshot()->performance.inFlight == 0; }));
+  stop(*s, h);
+}

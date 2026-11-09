@@ -71,6 +71,11 @@ void HierarchyPanel::onSelectionChanged() {
 void HierarchyPanel::dropEvent(QDropEvent *event) {
   auto *dragged = currentItem();
   auto childId = idFromItem(dragged);
+  std::optional<EditorEntityId> beforeParent;
+  if (dragged) {
+    if (auto *bp = dragged->parent())
+      beforeParent = idFromItem(bp);
+  }
   // Let Qt compute drop target, then read parent after move.
   QTreeWidget::dropEvent(event);
   if (!commands_.reparent || !childId.isValid())
@@ -81,6 +86,9 @@ void HierarchyPanel::dropEvent(QDropEvent *event) {
   std::optional<EditorEntityId> parent;
   if (auto *p = item->parent())
     parent = idFromItem(p);
+  // Minor1: parent unchanged → do not call reparent (no undo entry).
+  if (beforeParent == parent)
+    return;
   try {
     commands_.reparent(childId, parent);
   } catch (std::invalid_argument const &ex) {

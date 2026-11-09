@@ -137,9 +137,9 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
     try {
       commands_.setEntityParent(child, parent);
     } catch (std::invalid_argument const &ex) {
+      // Minor4: tip once via status; do not rethrow (HierarchyPanel also tips).
       if (status_)
         status_->setText(QStringLiteral("Hierarchy: %1").arg(QString::fromUtf8(ex.what())));
-      throw;
     }
   };
   hcmd.tip = [this](QString const &msg) {
@@ -177,6 +177,14 @@ MainWindow::MainWindow(UiCommands c) : commands_(std::move(c)) {
   pcmd.clearCamera = [this](EditorEntityId id) {
     if (commands_.clearEntityCamera)
       commands_.clearEntityCamera(id);
+  };
+  pcmd.beginEditMerge = [this]() {
+    if (commands_.beginEditMerge)
+      commands_.beginEditMerge();
+  };
+  pcmd.endEditMerge = [this]() {
+    if (commands_.endEditMerge)
+      commands_.endEditMerge();
   };
   pcmd.tip = [this](QString const &msg) {
     if (status_)

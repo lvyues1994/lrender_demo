@@ -83,6 +83,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   std::unique_ptr<AssetInstall> installer;
   editor::EditorScene editor;
   editor::CommandHistory history;
+  std::uint64_t editMergeEpoch_ = 0;
   std::map<AssetRequestId, LoadTicket> loads;
   std::optional<AssetEntry> pendingLoad;
   CpuAssetPtr readyAsset;
@@ -610,6 +611,9 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
         snap.camera = cam->lens;
       if (auto const *ovr = editor.registry().try_get<editor::MaterialOverride>(e))
         snap.materialOverride = ovr->value;
+
+      if (auto const *mat = editor.registry().try_get<editor::MaterialRef>(e))
+        snap.materialBase = editor.materialBaseOf(mat->id);
       value.entities.push_back(std::move(snap));
     }
   }
@@ -640,6 +644,9 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
       names.push_back(asset->model.value + "/part" + std::to_string(i));
     // I2: World is SoT for parent/local transform of installed (and every WorldLink).
     editor.remirrorInstalledFromWorld(*resources.world, ents, names, meshes, mats);
+    // C1: remember install-time MaterialDesc (textures) keyed by original MaterialId.
+    for (auto const &entry : installer->installedMaterialEntries())
+      editor.rememberMaterialBase(entry.id, entry.desc);
   }
 
   void adoptInstalledIntoEditor() {
@@ -1108,6 +1115,9 @@ void RenderSession::setNormalMapping(bool enabled) {
     return;
   try {
     s.installer->setNormalMapping(enabled);
+
+    for (auto const &entry : s.installer->installedMaterialEntries())
+      s.editor.rememberMaterialBase(entry.id, entry.desc);
     s.normalMapping = enabled;
     s.sceneParametersChanged();
   } catch (std::exception const &e) {
@@ -1138,6 +1148,9 @@ void RenderSession::setRoughness(float roughness) {
     throw std::invalid_argument("roughness requires finite [0,1]");
   try {
     s.installer->setRoughness(roughness);
+
+    for (auto const &entry : s.installer->installedMaterialEntries())
+      s.editor.rememberMaterialBase(entry.id, entry.desc);
     s.roughness = roughness;
     s.sceneParametersChanged();
   } catch (std::exception const &e) {
@@ -1260,6 +1273,8 @@ void RenderSession::setEntityParent(EditorEntityId id, std::optional<EditorEntit
     p = pe;
   }
   auto before = s.editor.registry().get<editor::Hierarchy>(e).parent;
+  if (before == p)
+    return; // Minor1: no-op same parent — do not record undo
   s.editor.setParent(e, p); // throws invalid_argument on cycle
   s.history.recordHierarchy(e, before, p);
   s.pump.markDirty();
@@ -1298,10 +1313,21 @@ void RenderSession::setEntityMaterialDesc(EditorEntityId id, lr::core::MaterialD
   if (!mat)
     return;
   std::optional<lr::core::MaterialDesc> before;
-  if (auto const *ovr = s.editor.registry().try_get<editor::MaterialOverride>(e))
+  lr::core::MaterialDesc applied = desc;
+  if (auto const *ovr = s.editor.registry().try_get<editor::MaterialOverride>(e)) {
     before = ovr->value;
-  s.editor.setMaterialOverride(e, desc);
-  s.history.recordMaterialDesc(e, mat->id, before, desc);
+    // Keep textures / untouch fields from existing CoW when panel only edits factors.
+    applied = ovr->value;
+    applied.roughness = desc.roughness;
+    applied.metallic = desc.metallic;
+  } else if (auto base = s.editor.materialBaseOf(mat->id)) {
+    // C1 first override: CoW from full base (textures), only overlay edited factors.
+    applied = *base;
+    applied.roughness = desc.roughness;
+    applied.metallic = desc.metallic;
+  }
+  s.editor.setMaterialOverride(e, applied);
+  s.history.recordMaterialDesc(e, mat->id, before, applied);
   s.pump.markDirty();
   s.queueTick();
   s.publish();
@@ -1429,14 +1455,13 @@ void RenderSession::beginEditMerge() {
   s.owner();
   if (s.blocked())
     return;
-  s.history.beginMerge();
+  s.editMergeEpoch_ = s.history.beginMerge();
 }
 void RenderSession::endEditMerge() {
   auto &s = *impl_;
   s.owner();
-  if (s.blocked())
-    return;
-  s.history.endMerge();
+  s.history.endMerge(s.editMergeEpoch_);
+  s.editMergeEpoch_ = 0;
 }
 
 } // namespace demo

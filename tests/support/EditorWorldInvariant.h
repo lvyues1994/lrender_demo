@@ -62,19 +62,32 @@ inline void assertEditorWorldConsistent(demo::editor::EditorScene const &scene,
       CHECK(plink->id == *wp);
     }
 
-    // R1: MeshRef/MaterialRef must match World::renderableOf exactly (both present
-    // with same ids, or both absent). Remirror must not re-stamp installer catalogs.
+    // R1/C1: MeshRef matches World mesh. MaterialRef is the original shared id;
+    // with MaterialOverride, World renderable uses a CoW copyId (!= MaterialRef).
     auto renderable = world.renderableOf(link.id);
     auto const *mesh = reg.try_get<demo::editor::MeshRef>(e);
     auto const *mat = reg.try_get<demo::editor::MaterialRef>(e);
+    auto const *ovr = reg.try_get<demo::editor::MaterialOverride>(e);
     if (renderable) {
       REQUIRE(mesh);
       REQUIRE(mat);
       CHECK(mesh->id == renderable->mesh);
-      CHECK(mat->id == renderable->material);
+      if (ovr) {
+        CHECK(ovr->copyId.isValid());
+        CHECK(renderable->material == ovr->copyId);
+        CHECK(renderable->material != mat->id);
+        // Override desc keeps textures from the base copy (panel must not wipe them).
+        if (auto base = scene.materialBaseOf(mat->id)) {
+          CHECK(ovr->value.baseColorTexture == base->baseColorTexture);
+          CHECK(ovr->value.normalTexture == base->normalTexture);
+        }
+      } else {
+        CHECK(mat->id == renderable->material);
+      }
     } else {
       CHECK_FALSE(mesh);
       CHECK_FALSE(mat);
+      CHECK_FALSE(ovr);
     }
 
     // E4: Camera — if present, World::cameraOf succeeds and lens FOV/near/far match.
@@ -91,12 +104,10 @@ inline void assertEditorWorldConsistent(demo::editor::EditorScene const &scene,
     if (reg.all_of<demo::editor::Light>(e)) {
       CHECK(world.isAlive(link.id));
     }
-    // MaterialOverride is editor SoT (replaceMaterial is write-only); requires MaterialRef.
-    if (reg.all_of<demo::editor::MaterialOverride>(e)) {
+    if (ovr) {
       REQUIRE(mat);
-      auto const &ovr = reg.get<demo::editor::MaterialOverride>(e).value;
-      CHECK(std::isfinite(ovr.roughness));
-      CHECK(std::isfinite(ovr.metallic));
+      CHECK(std::isfinite(ovr->value.roughness));
+      CHECK(std::isfinite(ovr->value.metallic));
     }
     CHECK_FALSE(reg.all_of<demo::editor::Dirty>(e));
   }

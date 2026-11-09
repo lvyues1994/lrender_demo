@@ -31,6 +31,8 @@ struct UiCommands {
   std::function<void(EditorEntityId)> clearEntityLight;
   std::function<void(EditorEntityId, lr::scene::CameraLens)> setEntityCamera;
   std::function<void(EditorEntityId)> clearEntityCamera;
+  std::function<void()> beginEditMerge;
+  std::function<void()> endEditMerge;
 };
 class ViewportHost : public QWidget {
 public:

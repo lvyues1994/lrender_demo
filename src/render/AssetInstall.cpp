@@ -234,4 +234,32 @@ std::vector<lr::core::MaterialId> const &AssetInstall::installedPartMaterials() 
   // Parallel to installed.entities / meshes — filled in step() when each part is created.
   return impl_->installed.partMaterials;
 }
+std::vector<AssetInstall::MaterialEntry> AssetInstall::installedMaterialEntries() const {
+  auto &s = *impl_;
+  s.check();
+  std::vector<MaterialEntry> out;
+  auto const &b = s.installed;
+  if (!b.asset)
+    return out;
+  out.reserve(b.materialMap.size());
+  for (std::size_t i = 0; i < b.materialMap.size(); ++i) {
+    if (!b.materialMap[i])
+      continue;
+    auto const &m = b.asset->materials[i];
+    auto d = m.factors;
+    if (s.roughness)
+      d.roughness = *s.roughness;
+    if (!s.normalMapping)
+      d.normalScale = 0;
+    auto texture = [&](auto index) -> std::optional<lr::core::TextureId> {
+      return index ? b.textureMap[*index] : std::nullopt;
+    };
+    d.baseColorTexture = texture(m.baseColorTexture);
+    d.normalTexture = texture(m.normalTexture);
+    d.emissiveTexture = texture(m.emissiveTexture);
+    out.push_back(MaterialEntry{*b.materialMap[i], d});
+  }
+  return out;
+}
+
 } // namespace demo

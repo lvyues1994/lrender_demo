@@ -56,8 +56,11 @@ struct Camera {
 };
 
 // Authoritative MaterialDesc override for MaterialRef::id (WorldResources::replaceMaterial).
+// Full MaterialDesc (textures preserved). World renderable uses `copyId` (CoW);
+// MaterialRef always keeps the original shared material (E3 reference semantics).
 struct MaterialOverride {
   lr::core::MaterialDesc value{};
+  lr::core::MaterialId copyId{}; // invalid until first sync creates the copy
 };
 
 
