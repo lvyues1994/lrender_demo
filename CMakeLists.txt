@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 project(lrender_demo VERSION 0.1.0 LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
@@ -22,11 +22,15 @@ if(NOT LQTEXEC_QT_MAJOR_VERSION STREQUAL "5")
 endif()
 find_package(Qt5 5.15 REQUIRED COMPONENTS Core Gui Widgets)
 include(cmake/LocalDependencies.cmake)
+# EnTT (header-only); locked under third_party/entt — do not add_subdirectory (needs CMake 3.28).
+add_library(entt INTERFACE)
+add_library(EnTT::EnTT ALIAS entt)
+target_include_directories(entt INTERFACE "${PROJECT_SOURCE_DIR}/third_party/entt/src")
 # Consumers must use the upstream WHOLE_ARCHIVE wrapper lr::render, not lr_render.
-add_library(demo_core STATIC src/render/Diagnostics.cpp src/assets/AssetRoot.cpp src/render/SessionState.cpp src/presentation/ReadbackAdapter.cpp src/render/FramePump.cpp src/render/RenderSession.cpp src/render/SessionFrameSubmit.cpp src/assets/AssetCatalog.cpp src/assets/ObjLoader.cpp src/assets/TgaDecoder.cpp src/assets/TinyrendererAdapter.cpp src/assets/AssetLoader.cpp src/render/AssetInstall.cpp)
+add_library(demo_core STATIC src/render/Diagnostics.cpp src/assets/AssetRoot.cpp src/render/SessionState.cpp src/presentation/ReadbackAdapter.cpp src/render/FramePump.cpp src/render/RenderSession.cpp src/render/SessionFrameSubmit.cpp src/assets/AssetCatalog.cpp src/assets/ObjLoader.cpp src/assets/TgaDecoder.cpp src/assets/TinyrendererAdapter.cpp src/assets/AssetLoader.cpp src/render/AssetInstall.cpp src/editor/EditorScene.cpp)
 target_include_directories(demo_core PUBLIC "${PROJECT_SOURCE_DIR}/src")
-target_link_libraries(demo_core PUBLIC Qt5::Widgets lqtexec::lqtexec lr::render lr::scene)
-target_compile_features(demo_core PUBLIC cxx_std_17)
+target_link_libraries(demo_core PUBLIC Qt5::Widgets lqtexec::lqtexec lr::render lr::scene EnTT::EnTT)
+target_compile_features(demo_core PUBLIC cxx_std_20)
 # Qt's `slots` macro corrupts stackfull's public `slots` data members.
 # Self-owned Qt code must use Q_SIGNALS/Q_SLOTS/Q_EMIT instead of keywords.
 target_compile_definitions(demo_core PUBLIC QT_NO_KEYWORDS)
@@ -91,7 +95,7 @@ add_executable(lrender_demo src/app/main.cpp)
 target_link_libraries(lrender_demo PRIVATE demo_ui)
 
 target_sources(demo_tests PRIVATE tests/shutdown_test.cpp)
-target_sources(demo_tests PRIVATE tests/workflow_test.cpp)
+target_sources(demo_tests PRIVATE tests/workflow_test.cpp tests/editor_scene_test.cpp)
 
 target_sources(demo_core PRIVATE src/app/ApplicationLifetime.cpp)
 

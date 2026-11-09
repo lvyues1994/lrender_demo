@@ -1,6 +1,7 @@
 #pragma once
 #include "assets/CpuAsset.h"
 #include <lr/scene/World.h>
+#include <vector>
 namespace demo {
 // Serial World-owner journal. Caller MUST gate extractDelta from begin until
 // commit/rollback, including other scene updates. Only our entities/refs are
@@ -23,6 +24,11 @@ public:
   bool active() const;
   std::size_t completedParts() const;
   CpuAssetPtr current() const;
+  // Installed World handles after commit (empty while staging / after clear).
+  std::vector<lr::core::EntityId> const &installedEntities() const;
+  std::vector<lr::core::MeshId> const &installedMeshes() const;
+  std::vector<lr::core::MaterialId> const &installedPartMaterials() const;
+
 
 private:
   struct Impl;

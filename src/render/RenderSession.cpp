@@ -1,5 +1,6 @@
 #include "RenderSession.h"
 #include "AssetInstall.h"
+#include "editor/EditorScene.h"
 #include "Diagnostics.h"
 #include "FramePump.h"
 #include "SessionFrameSubmit.h"
@@ -76,6 +77,7 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   std::vector<std::string> presentationWarnings;
   AssetLoader *loader = nullptr; // injection outlives this session through onStopped
   std::unique_ptr<AssetInstall> installer;
+  editor::EditorScene editor;
   std::map<AssetRequestId, LoadTicket> loads;
   std::optional<AssetEntry> pendingLoad;
   CpuAssetPtr readyAsset;
@@ -482,6 +484,8 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
   void destroyResources(bool ambiguousBarrier) {
     phase = Destroying;
     // All load receipts retired; only GUI touches World, even during terminal cleanup.
+    if (installer)
+      editor.resetAuthoring();
     installer.reset();
     auto bundle = std::make_shared<Resources>(std::move(resources));
     auto self = shared_from_this();
@@ -561,6 +565,26 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     }
     publish();
   }
+
+  void adoptInstalledIntoEditor() {
+    editor.resetAuthoring();
+    if (!installer)
+      return;
+    auto asset = installer->current();
+    if (!asset)
+      return;
+    auto const &ents = installer->installedEntities();
+    auto const &meshes = installer->installedMeshes();
+    auto const &mats = installer->installedPartMaterials();
+    if (ents.size() != meshes.size() || ents.size() != mats.size())
+      throw std::logic_error("AssetInstall entity/mesh/material size mismatch");
+    for (std::size_t i = 0; i < ents.size(); ++i) {
+      auto name = asset->model.value + "/part" + std::to_string(i);
+      editor.adoptWorldEntity(ents[i], std::move(name), lr::core::Transform::identity(), meshes[i],
+                              mats[i], std::nullopt);
+    }
+  }
+
   bool installStep() {
     if (!readyAsset && !installer->active())
       return false;
@@ -586,6 +610,8 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     try {
       if (installer->step(1)) {
         installer->commit();
+        // E2: registry becomes authoring SoT for the installed model (World already filled).
+        adoptInstalledIntoEditor();
         if (target) {
           state.presentationInvalidated(
               {ErrorStage::Surface, true, "asset committed", "fresh history after atomic scene replacement"});
@@ -658,6 +684,8 @@ struct RenderSession::Impl : QObject, std::enable_shared_from_this<Impl> {
     lr::render::FrameDesc frame;
     try {
       if (!pending) {
+        // Push editor dirty TRS/hierarchy/mesh-mat into World before extract.
+        editor.syncToWorld(*resources.world);
         pending = resources.world->extractDelta();
         ++performance.deltaExtractions;
       }
@@ -1065,4 +1093,12 @@ void RenderSession::resume() {
 }
 void RenderSession::requestStop() { impl_->stop(); }
 SessionSnapshotPtr RenderSession::snapshot() const { return impl_->snapshot(); }
+editor::EditorScene &RenderSession::editorScene() {
+  impl_->owner();
+  return impl_->editor;
+}
+editor::EditorScene const &RenderSession::editorScene() const {
+  impl_->owner();
+  return impl_->editor;
+}
 } // namespace demo

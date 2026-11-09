@@ -15,6 +15,7 @@ struct AssetInstall::Impl {
     std::vector<lr::core::EntityId> entities;
     std::vector<lr::core::MeshId> meshes;
     std::vector<lr::core::MaterialId> materials;
+    std::vector<lr::core::MaterialId> partMaterials; // parallel to entities
     std::vector<lr::core::TextureId> textures;
     std::vector<std::optional<lr::core::MaterialId>> materialMap;
     std::vector<std::optional<lr::core::TextureId>> textureMap;
@@ -178,6 +179,7 @@ bool AssetInstall::step(std::size_t maxParts) {
       b.meshes.push_back(mesh);
       auto entity = s.world.createEntity({}, std::nullopt);
       b.entities.push_back(entity);
+      b.partMaterials.push_back(material);
       s.world.setRenderable(entity, {mesh, material});
       ++b.next;
     }
@@ -216,5 +218,19 @@ std::size_t AssetInstall::completedParts() const {
 CpuAssetPtr AssetInstall::current() const {
   impl_->check();
   return impl_->installed.asset;
+}
+std::vector<lr::core::EntityId> const &AssetInstall::installedEntities() const {
+  impl_->check();
+  return impl_->installed.entities;
+}
+std::vector<lr::core::MeshId> const &AssetInstall::installedMeshes() const {
+  impl_->check();
+  return impl_->installed.meshes;
+}
+std::vector<lr::core::MaterialId> const &AssetInstall::installedPartMaterials() const {
+  impl_->check();
+  // Rebuild lazily from installed entities' renderables via materialMap order of parts.
+  // Stored parallel to entities at step time — add side vector.
+  return impl_->installed.partMaterials;
 }
 } // namespace demo

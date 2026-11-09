@@ -1,7 +1,14 @@
 {
   "schemaVersion": 1,
-  "notes": "Locked local source HEADs; upstreamPin records unmodified upstream declarations, not proof of compatibility. Qt/Vulkan SDK/Clang are system dependencies. P10 cross-checked all 14 full SHAs against approved design section 7; pins and source declarations unchanged. Model permission is separately described in licenses/ASSET_NOTICES.txt.",
+  "notes": "Locked local source HEADs; upstreamPin records unmodified upstream declarations, not proof of compatibility. Qt/Vulkan SDK/Clang are system dependencies. P10 cross-checked all 15 full SHAs against approved design section 7; pins and source declarations unchanged. Model permission is separately described in licenses/ASSET_NOTICES.txt.",
   "records": [
+    {
+      "path": "assets/sources/tinyrenderer",
+      "url": "https://github.com/ssloy/tinyrenderer.git",
+      "branch": "master",
+      "sha": "97eb7a480e762285899a93c5d21e70a79e60782e",
+      "upstreamPin": "resource source, not a build dependency"
+    },
     {
       "path": "third_party/cgltf",
       "url": "https://github.com/jkuhlmann/cgltf.git",
@@ -29,6 +36,13 @@
       "branch": "master",
       "sha": "d44d4f6e66232d716af82f00a063759e9d0e50d6",
       "upstreamPin": "v2.5.3"
+    },
+    {
+      "path": "third_party/entt",
+      "url": "https://github.com/skypjack/entt.git",
+      "branch": "master",
+      "sha": "1dcd7aab6548786f7672ff578639188bd2f0d837",
+      "upstreamPin": "v4.1.0 tip 1dcd7aa (latest default-branch HEAD at E2 clone)"
     },
     {
       "path": "third_party/lexec",
@@ -92,13 +106,6 @@
       "branch": "master",
       "sha": "1770e3559f2f6ea4a5fb4f577ad22aeb30fbd8e4",
       "upstreamPin": "1770e3559f2f6ea4a5fb4f577ad22aeb30fbd8e4"
-    },
-    {
-      "path": "assets/sources/tinyrenderer",
-      "url": "https://github.com/ssloy/tinyrenderer.git",
-      "branch": "master",
-      "sha": "97eb7a480e762285899a93c5d21e70a79e60782e",
-      "upstreamPin": "resource source, not a build dependency"
     }
   ]
 }

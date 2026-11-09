@@ -2,6 +2,7 @@
 #include "SessionTypes.h"
 #include "presentation/PresentationAdapter.h"
 #include <lr/scene/World.h>
+#include "editor/EditorScene.h"
 namespace demo {
 class AssetLoader; // P8 nonowning injection only; no invented implementation
 // Construct and issue serial commands on GUI; inputs are initialized owned resources.
@@ -32,6 +33,8 @@ public:
   void selectModel(ModelId);
   void setNormalMapping(bool);
   void setAmbient(float);
+  editor::EditorScene &editorScene();
+  editor::EditorScene const &editorScene() const;
   void setRoughness(float);
   void setCamera(CameraState);
   void setRenderOptions(RenderOptions);
